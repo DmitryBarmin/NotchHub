@@ -224,7 +224,28 @@ final class ScreenshotCanvas: NSView {
         editor.changed = { [weak self] in self?.needsDisplay = true }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+    private var selectionCorners: [CGPoint] {
+        let r = editor.selection
+        return [CGPoint(x:r.minX,y:r.minY), CGPoint(x:r.maxX,y:r.minY),
+                CGPoint(x:r.minX,y:r.maxY), CGPoint(x:r.maxX,y:r.maxY)]
+    }
+    private func cornerRect(_ point: CGPoint) -> CGRect {
+        CGRect(x:point.x-12,y:point.y-12,width:24,height:24).intersection(bounds)
+    }
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .crosshair)
+        guard editor.valid else { return }
+        for (index, point) in selectionCorners.enumerated() {
+            let cursor: NSCursor
+            if #available(macOS 15.0, *) {
+                let positions: [NSCursor.FrameResizePosition] = [.topLeft, .topRight, .bottomLeft, .bottomRight]
+                cursor = .frameResize(position: positions[index], directions: [.inward, .outward])
+            } else {
+                cursor = .resizeLeftRight
+            }
+            addCursorRect(cornerRect(point), cursor: cursor)
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         NSImage(cgImage: editor.image, size: editor.size).draw(in: bounds, from: .zero, operation: .copy, fraction: 1, respectFlipped: true, hints: nil)
         let r = editor.selection
@@ -252,6 +273,7 @@ final class ScreenshotCanvas: NSView {
         }
     }
     func updateTools() {
+        window?.invalidateCursorRects(for: self)
         tools.isHidden = !editor.valid; actions.isHidden = !editor.valid
         guard editor.valid else { return }
         let r=editor.selection
@@ -272,10 +294,10 @@ final class ScreenshotCanvas: NSView {
         window?.makeFirstResponder(self)
         anchor = convert(event.locationInWindow, from: nil); original = editor.selection
         if event.clickCount == 2, editor.tool == .select { editor.selection = bounds; updateTools(); return }
-        if editor.tool == .select {
-            let corners = [CGPoint(x:original.minX,y:original.minY),CGPoint(x:original.maxX,y:original.minY),CGPoint(x:original.minX,y:original.maxY),CGPoint(x:original.maxX,y:original.maxY)]
-            if editor.valid, let i = corners.firstIndex(where: { hypot($0.x-anchor.x,$0.y-anchor.y)<12 }) { dragMode=2; opposite=corners[3-i] }
-            else if editor.valid, original.contains(anchor) { dragMode=1 }
+        if editor.valid, let i = selectionCorners.firstIndex(where: { cornerRect($0).contains(anchor) }) {
+            dragMode=2; opposite=selectionCorners[3-i]
+        } else if editor.tool == .select {
+            if editor.valid, original.contains(anchor) { dragMode=1 }
             else { dragMode=0; editor.selection = .zero }
         } else if editor.valid, original.contains(anchor) {
             dragMode=3
