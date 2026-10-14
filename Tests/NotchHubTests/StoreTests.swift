@@ -435,4 +435,128 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
     }
 
+    func testSectionVisibilityPersistsIndependentlyAndAllowsAllHidden() throws {
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        ClipboardShortcut.standard.save(to: defaults)
+        let shortcut = defaults.data(forKey: ClipboardShortcut.preferenceKey)
+        let settings = SectionSettings(defaults: defaults)
+        XCTAssertEqual(settings.current, .all)
+        for section in HubSection.allCases { settings.set(section, enabled: false) }
+        XCTAssertTrue(settings.current.isEmpty)
+        XCTAssertTrue(SectionSettings(defaults: defaults).current.isEmpty)
+        XCTAssertEqual(defaults.data(forKey: ClipboardShortcut.preferenceKey), shortcut)
+        settings.set(.note, enabled: true)
+        XCTAssertEqual(SectionSettings(defaults: defaults).current.firstVisible, .note)
+        defaults.set(-1, forKey: SectionVisibility.preferenceKey)
+        XCTAssertEqual(SectionSettings(defaults: defaults).current, .all)
+    }
+    func testHiddenActiveSectionClearsPreviewSelectionAndRoutesBothDisplayStates() {
+        let first = HubState(), second = HubState()
+        for state in [first, second] {
+            state.tab = 1; state.previewClip = Clip(kind: .text, title: "preview", fingerprint: "preview")
+            state.keyboardSelecting = true; state.selectedClipboardID = UUID()
+            XCTAssertTrue(state.applySectionVisibility(SectionVisibility(mask: 5)))
+            XCTAssertEqual(state.tab, 0)
+            XCTAssertNil(state.previewClip); XCTAssertFalse(state.keyboardSelecting); XCTAssertNil(state.selectedClipboardID)
+            XCTAssertTrue(state.applySectionVisibility(SectionVisibility(mask: 0)))
+            XCTAssertEqual(state.tab, -1)
+            XCTAssertEqual(state.expandedHeight, state.notchHeight + 70)
+            XCTAssertTrue(state.applySectionVisibility(SectionVisibility(mask: 4)))
+            XCTAssertEqual(state.tab, 2)
+            XCTAssertFalse(state.applySectionVisibility(SectionVisibility(mask: 12)))
+            XCTAssertEqual(state.tab, 2)
+        }
+    }
+    func testHidingTimerPausesItAndHiddenClipboardShortcutDoesNotTouchData() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain)), pb = NSPasteboard.withUniqueName()
+        defer { defaults.removePersistentDomain(forName: domain); pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        store.addText("history"); store.addText("shelf", shelf: true); store.setNote("note"); store.flushPendingNote()
+        let history = store.archive.clips, shelf = store.archive.shelf, note = store.archive.note
+        let delegate = AppDelegate(); delegate.store = store; delegate.clock = FocusClock()
+        delegate.sectionSettings = SectionSettings(defaults: defaults) { [weak delegate] in delegate?.applySectionVisibility($0) }
+        delegate.clock.reset(minutes: 5); delegate.clock.start()
+        delegate.sectionSettings.set(.timer, enabled: false)
+        XCTAssertFalse(delegate.clock.running); XCTAssertFalse(delegate.clock.hasScheduledTick)
+        XCTAssertGreaterThan(delegate.clock.remaining, 299)
+        pb.clearContents(); pb.setString("keep system clipboard", forType: .string)
+        delegate.cycle.begin(ids: history.map(\.id))
+        delegate.sectionSettings.set(.clipboard, enabled: false)
+        delegate.advanceClipboard(); delegate.finishClipboard()
+        XCTAssertNil(delegate.cycle.selectedID)
+        XCTAssertEqual(pb.string(forType: .string), "keep system clipboard")
+        XCTAssertEqual(store.archive.clips, history); XCTAssertEqual(store.archive.shelf, shelf); XCTAssertEqual(store.archive.note, note)
+    }
+    func testLayoutDefaultsPreserveBothScreenTypesAndHardwareMinimums() {
+        let notched = HubGeometry.resolve(.standard, screen: CGRect(x: 0, y: 0, width: 1470, height: 956), safeTop: 32, notchWidth: 179)
+        XCTAssertEqual(notched.panelWidth, 345); XCTAssertEqual(notched.panelHeight, 166)
+        XCTAssertEqual(notched.previewWidth, 680); XCTAssertEqual(notched.previewHeight, 432)
+        XCTAssertEqual(notched.islandWidth, 179); XCTAssertEqual(notched.islandHeight, 33); XCTAssertEqual(notched.topOffset, 0)
+        let external = HubGeometry.resolve(.standard, screen: CGRect(x: 1470, y: -124, width: 1920, height: 1080), safeTop: 0, notchWidth: nil)
+        XCTAssertEqual(external.panelHeight, 162); XCTAssertEqual(external.previewHeight, 424)
+        XCTAssertEqual(external.islandWidth, 104); XCTAssertEqual(external.islandHeight, 16); XCTAssertEqual(external.topOffset, 6)
+        var small = HubLayoutPreferences.standard
+        small.panelWidth = 240; small.previewWidth = 240; small.islandWidth = 80; small.islandHeight = 10; small.verticalOffset = -40
+        let geometry = HubGeometry.resolve(small, screen: CGRect(x: 0, y: 0, width: 1470, height: 956), safeTop: 32, notchWidth: 179)
+        XCTAssertEqual(geometry.islandWidth, 179); XCTAssertEqual(geometry.islandHeight, 33)
+        XCTAssertGreaterThanOrEqual(geometry.panelWidth, 179 + 164)
+        XCTAssertGreaterThanOrEqual(geometry.previewWidth, 179 + 164)
+        XCTAssertEqual(geometry.topOffset, 0)
+    }
+    func testLayoutPersistenceResetAndFramesStayOnSmallOffsetDisplay() throws {
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let settings = LayoutSettings(defaults: defaults)
+        settings.set(\.panelWidth, to: 720); settings.set(\.panelHeight, to: 600)
+        settings.set(\.previewWidth, to: 1200); settings.set(\.previewHeight, to: 900)
+        settings.set(\.verticalOffset, to: 120); settings.set(\.islandWidth, to: 400)
+        settings.set(\.islandHeight, to: 100); settings.set(\.panelOpacity, to: 0.4); settings.set(\.previewOpacity, to: 0.6)
+        XCTAssertEqual(LayoutSettings(defaults: defaults).current, settings.current)
+        for screen in [CGRect(x: -900, y: 300, width: 640, height: 480), CGRect(x: 100, y: -400, width: 200, height: 120)] {
+            let geometry = HubGeometry.resolve(settings.current, screen: screen, safeTop: 0, notchWidth: nil)
+            for size in [CGSize(width: geometry.panelWidth, height: geometry.panelHeight), CGSize(width: geometry.previewWidth, height: geometry.previewHeight), CGSize(width: geometry.islandWidth, height: geometry.islandHeight)] {
+                XCTAssertTrue(screen.contains(geometry.frame(screen: screen, width: size.width, height: size.height)))
+            }
+        }
+        settings.reset()
+        XCTAssertEqual(LayoutSettings(defaults: defaults).current, .standard)
+    }
+    func testMovedWideIslandKeepsNarrowTopBridgeAndSafeHoverExit() {
+        var layout = HubLayoutPreferences.standard; layout.islandWidth = 400; layout.verticalOffset = 100
+        let screen = CGRect(x: 0, y: 0, width: 1470, height: 956)
+        let geometry = HubGeometry.resolve(layout, screen: screen, safeTop: 32, notchWidth: 179)
+        let panel = geometry.frame(screen: screen, width: geometry.panelWidth, height: geometry.panelHeight)
+        XCTAssertEqual(geometry.triggerWidth, 177)
+        XCTAssertTrue(HubState.atTrigger(CGPoint(x: screen.midX, y: screen.maxY), screen: screen, notchWidth: geometry.triggerWidth))
+        XCTAssertTrue(HubState.insideHub(CGPoint(x: screen.midX, y: panel.maxY + 50), panel: panel, screen: screen, notchWidth: geometry.triggerWidth))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: screen.midX + 150, y: panel.maxY + 50), panel: panel, screen: screen, notchWidth: geometry.triggerWidth))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: screen.midX, y: panel.minY - 1), panel: panel, screen: screen, notchWidth: geometry.triggerWidth))
+    }
+
+    func testExpandedHoverIncludesWideAndTallCollapsedIslandWithoutWideningTopTrigger() {
+        let screen = CGRect(x: 0, y: 0, width: 1470, height: 956)
+        var layout = HubLayoutPreferences.standard; layout.islandWidth = 400; layout.panelWidth = 345
+        let geometry = HubGeometry.resolve(layout, screen: screen, safeTop: 32, notchWidth: 179)
+        let island = geometry.frame(screen: screen, width: geometry.islandWidth, height: geometry.islandHeight)
+        let panel = geometry.frame(screen: screen, width: geometry.panelWidth, height: geometry.panelHeight)
+        let tip = CGPoint(x: screen.midX + 190, y: island.midY)
+        XCTAssertTrue(island.contains(tip)); XCTAssertFalse(panel.contains(tip))
+        XCTAssertTrue(HubState.insideHub(tip, panel: panel, screen: screen, notchWidth: geometry.triggerWidth, island: island))
+        XCTAssertTrue(HubState.insideHub(CGPoint(x: tip.x + 1, y: tip.y), panel: panel, screen: screen, notchWidth: geometry.triggerWidth, island: island))
+        XCTAssertFalse(HubState.atTrigger(CGPoint(x: tip.x, y: screen.maxY), screen: screen, notchWidth: geometry.triggerWidth))
+        layout.islandHeight = 100
+        let external = HubGeometry.resolve(layout, screen: screen, safeTop: 0, notchWidth: nil)
+        let externalIsland = external.frame(screen: screen, width: external.islandWidth, height: external.islandHeight)
+        let emptyPanel = external.frame(screen: screen, width: external.panelWidth, height: min(external.panelHeight, external.notchHeight + 70))
+        let lowerTip = CGPoint(x: screen.midX, y: externalIsland.minY + 1)
+        XCTAssertFalse(emptyPanel.contains(lowerTip))
+        XCTAssertTrue(HubState.insideHub(lowerTip, panel: emptyPanel, screen: screen, notchWidth: external.triggerWidth, island: externalIsland))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: screen.midX, y: externalIsland.minY - 1), panel: emptyPanel, screen: screen, notchWidth: external.triggerWidth, island: externalIsland))
+    }
+
 }

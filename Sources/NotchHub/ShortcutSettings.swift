@@ -67,34 +67,128 @@ final class ShortcutSettings: ObservableObject {
     }
 }
 
+struct SettingsCard<Content: View>: View {
+    let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                content.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
+            } else {
+                content.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                    .overlay { RoundedRectangle(cornerRadius: 18).stroke(.primary.opacity(0.06), lineWidth: 0.5) }
+            }
+        }
+    }
+}
+
+struct SettingsHeading: View {
+    let title: String
+    let icon: String
+    var body: some View {
+        Label(title, systemImage: icon).font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
+    }
+}
+
 struct ShortcutSettingsView: View {
     @ObservedObject var settings: ShortcutSettings
+    @ObservedObject var sections: SectionSettings
+    @ObservedObject var layout: LayoutSettings
     @State private var draft: ClipboardShortcut
-    init(settings: ShortcutSettings) { self.settings = settings; _draft = State(initialValue: settings.current) }
+    @State private var page = 0
+    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings) {
+        self.settings = settings; self.sections = sections; self.layout = layout; _draft = State(initialValue: settings.current)
+    }
     private func modifier(_ flag: UInt32) -> Binding<Bool> {
         Binding(get: { draft.modifiers & flag != 0 }, set: { if $0 { draft.modifiers |= flag } else { draft.modifiers &= ~flag } })
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Переключение буфера").font(.headline)
-            HStack(spacing: 15) {
-                Toggle("⌘", isOn: modifier(UInt32(cmdKey)))
-                Toggle("⌥", isOn: modifier(UInt32(optionKey)))
-                Toggle("⌃", isOn: modifier(UInt32(controlKey)))
-                Toggle("⇧", isOn: modifier(UInt32(shiftKey)))
-            }.toggleStyle(.checkbox)
-            Picker("Клавиша", selection: $draft.keyCode) {
-                ForEach(ClipboardShortcut.keys, id: \.code) { key in Text(key.label).tag(key.code) }
-            }.frame(width: 200)
-            Text(draft.isValid ? draft.instruction + ". Отпусти \(draft.primaryLabel), чтобы выбрать." : draft.validationMessage ?? "")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let message = settings.message { Text(message).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            HStack {
-                Button("По умолчанию") { settings.restoreDefault(draft: &draft) }
+        VStack(spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: "capsule.inset.filled").font(.system(size: 25, weight: .medium)).foregroundStyle(.blue)
+                    .frame(width: 48, height: 48).background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("NotchHub").font(.system(size: 23, weight: .semibold))
+                    Text("Настрой под себя").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Button("Применить") { settings.apply(draft) }.disabled(!draft.isValid || draft == settings.current)
             }
-        }.padding(24).frame(width: 380)
+            Picker("Настройки", selection: $page) {
+                Text("Основные").tag(0)
+                Text("Размеры").tag(1)
+                Text("Клавиши").tag(2)
+            }.pickerStyle(.segmented).controlSize(.large).labelsHidden()
+            ScrollView {
+                Group {
+                    switch page {
+                    case 0: sectionsCard
+                    case 1: LayoutSettingsView(settings: layout)
+                    default: shortcutCard
+                    }
+                }.padding(.vertical, 2)
+            }.scrollIndicators(.hidden)
+        }.padding(24)
+        .background {
+            LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
         .onChange(of: settings.current) { _, value in draft = value }
+    }
+    private var sectionsCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsHeading(title: "Разделы панели", icon: "square.grid.2x2")
+                Text("Оставь только то, чем пользуешься.").font(.system(size: 12)).foregroundStyle(.secondary)
+                VStack(spacing: 0) {
+                    ForEach(HubSection.allCases) { section in
+                        if section != .clipboard { Divider().padding(.vertical, 10) }
+                        HStack(spacing: 12) {
+                            Image(systemName: section.icon).font(.system(size: 16)).foregroundStyle(.blue)
+                                .frame(width: 32, height: 32).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(section.title).font(.system(size: 13, weight: .medium))
+                                Text(section.detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Toggle(section.title, isOn: Binding(get: { sections.current.isEnabled(section) }, set: { sections.set(section, enabled: $0) }))
+                                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private var shortcutCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 18) {
+                SettingsHeading(title: "Переключение буфера", icon: "keyboard")
+                HStack {
+                    Text("Сочетание клавиш").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(draft.label).font(.system(size: 16, weight: .medium, design: .rounded)).monospaced()
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9))
+                }
+                HStack(spacing: 18) {
+                    Toggle("⌘", isOn: modifier(UInt32(cmdKey)))
+                    Toggle("⌥", isOn: modifier(UInt32(optionKey)))
+                    Toggle("⌃", isOn: modifier(UInt32(controlKey)))
+                    Toggle("⇧", isOn: modifier(UInt32(shiftKey)))
+                    Spacer()
+                    Picker("Клавиша", selection: $draft.keyCode) {
+                        ForEach(ClipboardShortcut.keys, id: \.code) { key in Text(key.label).tag(key.code) }
+                    }.labelsHidden().frame(width: 88)
+                }.toggleStyle(.checkbox)
+                Text(draft.isValid ? draft.instruction + ". Отпусти \(draft.primaryLabel), чтобы выбрать." : draft.validationMessage ?? "")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let message = settings.message { Text(message).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                HStack {
+                    Button("По умолчанию") { settings.restoreDefault(draft: &draft) }.buttonStyle(.borderless)
+                    Spacer()
+                    Button("Применить") { settings.apply(draft) }.buttonStyle(.borderedProminent).disabled(!draft.isValid || draft == settings.current)
+                }
+            }
+        }
     }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class HubState: ObservableObject {
+    @Published var sections = SectionVisibility.all
     @Published var shortcut = ClipboardShortcut.standard
     @Published var expanded = false
     @Published var pinned = false
@@ -10,25 +11,37 @@ final class HubState: ObservableObject {
     @Published var notchHeight: CGFloat = 32
     @Published var collapsedWidth: CGFloat = 179
     @Published var expandedWidth: CGFloat = 345
+    @Published var panelHeight: CGFloat = 166
+    @Published var panelOpacity: Double = 1
+    @Published var previewOpacity: Double = 1
+    @Published var collapsedHeight: CGFloat = 33
+    @Published var topOffset: CGFloat = 0
+    @Published var triggerWidth: CGFloat = 177
     @Published var previewClip: Clip?
     @Published var previewWidth: CGFloat = 680
     @Published var previewContentHeight: CGFloat = 400
     var panelWidth: CGFloat { previewClip == nil ? expandedWidth : previewWidth }
-    var expandedHeight: CGFloat { previewClip == nil ? (notchHeight + 300) / 2 : notchHeight + previewContentHeight }
+    var expandedHeight: CGFloat { previewClip == nil ? (sections.isEmpty ? min(panelHeight, notchHeight + 70) : panelHeight) : notchHeight + previewContentHeight }
     @Published var hasNotch = true
-    var collapsedHeight: CGFloat { hasNotch ? notchHeight + 1 : 16 }
-    var topOffset: CGFloat { hasNotch ? 0 : 6 }
     @Published var tab = 0
     @Published var keyboardSelecting = false
     @Published var selectedClipboardID: UUID?
     var reveal: (() -> Void)?
     var hide: (() -> Void)?
     var showPreview: ((Clip?) -> Void)?
+    var openSettings: (() -> Void)?
+    @discardableResult func applySectionVisibility(_ visibility: SectionVisibility) -> Bool {
+        sections = visibility
+        guard !visibility.isEnabled(tab: tab) else { return false }
+        tab = visibility.firstVisible?.rawValue ?? -1
+        previewClip = nil; keyboardSelecting = false; selectedClipboardID = nil
+        return true
+    }
     static func atTrigger(_ point: CGPoint, screen: CGRect, notchWidth: CGFloat) -> Bool {
         point.y >= screen.maxY - 1 && point.y <= screen.maxY && abs(point.x - screen.midX) <= notchWidth / 2
     }
-    static func insideHub(_ point: CGPoint, panel: CGRect, screen: CGRect, notchWidth: CGFloat) -> Bool {
-        panel.contains(point) || (point.y >= panel.maxY && point.y <= screen.maxY && abs(point.x - screen.midX) <= notchWidth / 2)
+    static func insideHub(_ point: CGPoint, panel: CGRect, screen: CGRect, notchWidth: CGFloat, island: CGRect? = nil) -> Bool {
+        panel.contains(point) || (island?.contains(point) ?? false) || (point.y >= panel.maxY && point.y <= screen.maxY && abs(point.x - screen.midX) <= notchWidth / 2)
     }
 }
 
@@ -41,14 +54,16 @@ final class PanelController {
     let state: HubState
     let panel: IslandPanel
     private var screen: NSScreen?
+    private var layout = HubLayoutPreferences.standard
     private var pointerMonitor: Any?
     private var localPointerMonitor: Any?
     private var escapeMonitor: Any?
     private var triggerArmed = true
     private var hoverCheckPending = false
-    init(store: HubStore, clock: FocusClock, state: HubState, screen: NSScreen) {
+    init(store: HubStore, clock: FocusClock, state: HubState, screen: NSScreen, layout: HubLayoutPreferences = .standard) {
         self.state = state
         self.screen = screen
+        self.layout = layout
         panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.acceptsMouseMovedEvents = true
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
@@ -92,19 +107,23 @@ final class PanelController {
         state.reveal = nil
         state.hide = nil
         state.showPreview = nil
+        state.openSettings = nil
+    }
+    func applySectionVisibility(_ visibility: SectionVisibility) {
+        let routed = state.applySectionVisibility(visibility)
+        if routed { state.showPreview?(nil) }
     }
     func contains(_ point: CGPoint) -> Bool { screen?.frame.contains(point) ?? false }
+    func applyLayout(_ preferences: HubLayoutPreferences) { layout = preferences; position() }
     func position() {
         guard let screen else { return }
-        state.hasNotch = screen.safeAreaInsets.top > 0
-        state.notchHeight = max(24, screen.safeAreaInsets.top)
-        state.expandedWidth = min(345, screen.frame.width - 40)
-        state.previewWidth = min(680, screen.frame.width - 40)
-        state.previewContentHeight = min(400, screen.frame.height - state.notchHeight - 40)
-        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            // One point around the hardware boundary gives the outline visible pixels.
-            state.collapsedWidth = right.minX - left.maxX + 2
-        } else { state.collapsedWidth = 104 }
+        let geometry = HubGeometry.resolve(layout, screen: screen)
+        state.hasNotch = geometry.hasNotch; state.notchHeight = geometry.notchHeight
+        state.expandedWidth = geometry.panelWidth; state.panelHeight = geometry.panelHeight
+        state.previewWidth = geometry.previewWidth; state.previewContentHeight = max(0, geometry.previewHeight - geometry.notchHeight)
+        state.collapsedWidth = geometry.islandWidth; state.collapsedHeight = geometry.islandHeight
+        state.topOffset = geometry.topOffset; state.triggerWidth = geometry.triggerWidth
+        state.panelOpacity = layout.panelOpacity; state.previewOpacity = layout.previewOpacity
         resize(expanded: state.expanded, animate: false)
     }
     private func resize(expanded: Bool, animate: Bool) {
@@ -132,14 +151,19 @@ final class PanelController {
     }
     private func checkHover() {
         let point = NSEvent.mouseLocation
-        let atEdge = screen.map { HubState.atTrigger(point, screen: $0.frame, notchWidth: state.collapsedWidth - 2) } ?? false
-        if !atEdge { triggerArmed = true }
+        let atEdge = screen.map { HubState.atTrigger(point, screen: $0.frame, notchWidth: state.triggerWidth) } ?? false
+        let atIsland = !state.expanded && panel.frame.contains(point)
+        let atTrigger = atEdge || atIsland
+        if !atTrigger { triggerArmed = true }
         if !state.expanded {
-            if atEdge && triggerArmed { triggerArmed = false; expand() }
+            if atTrigger && triggerArmed { triggerArmed = false; expand() }
             return
         }
         if atEdge { triggerArmed = false }
-        let inside = screen.map { HubState.insideHub(point, panel: panel.frame, screen: $0.frame, notchWidth: state.collapsedWidth - 2) } ?? panel.frame.contains(point)
+        let inside = screen.map {
+            let island = NSRect(x: $0.frame.midX - state.collapsedWidth / 2, y: $0.frame.maxY - state.collapsedHeight - state.topOffset, width: state.collapsedWidth, height: state.collapsedHeight)
+            return HubState.insideHub(point, panel: panel.frame, screen: $0.frame, notchWidth: state.triggerWidth, island: island)
+        } ?? panel.frame.contains(point)
         if state.pinned || state.keyboardSelecting || state.dialogPresented || inside || NSEvent.pressedMouseButtons != 0 {
             return
         }
@@ -225,8 +249,11 @@ struct HubView: View {
         .frame(width: state.expanded ? state.panelWidth : state.collapsedWidth, height: state.expanded ? state.expandedHeight : state.collapsedHeight, alignment: .top)
         .background {
             if state.expanded {
-                IslandGlass(notchHeight: state.notchHeight)
+                IslandGlass(notchHeight: state.notchHeight).opacity(state.previewClip == nil ? state.panelOpacity : state.previewOpacity)
             } else if !state.hasNotch { Color.black.clipShape(Capsule()) }
+            else if state.topOffset > 0 || state.collapsedHeight > state.notchHeight + 1 || state.collapsedWidth > state.triggerWidth + 2 {
+                Color.black.clipShape(UnevenRoundedRectangle(topLeadingRadius: 8, bottomLeadingRadius: 8, bottomTrailingRadius: 8, topTrailingRadius: 8))
+            }
         }
         .overlay {
             if state.expanded {
@@ -251,10 +278,10 @@ struct HubView: View {
         .overlay(alignment: .topLeading) {
             if state.expanded {
                 HStack(spacing: 3) {
-                    tab("Буфер", icon: "doc.on.clipboard", index: 0)
-                    tab("Полка", icon: "tray", index: 1)
-                    tab("Заметка", icon: "square.and.pencil", index: 2)
-                    tab("Фокус", icon: "timer", index: 3)
+                    if state.sections.isEnabled(.clipboard) { tab("Буфер", icon: "doc.on.clipboard", index: 0) }
+                    if state.sections.isEnabled(.shelf) { tab("Полка", icon: "tray", index: 1) }
+                    if state.sections.isEnabled(.note) { tab("Заметка", icon: "square.and.pencil", index: 2) }
+                    if state.sections.isEnabled(.timer) { tab("Фокус", icon: "timer", index: 3) }
                 }.frame(height: state.notchHeight).padding(.leading, 8)
             }
         }
@@ -265,6 +292,7 @@ struct HubView: View {
         }
         .preferredColorScheme(.dark)
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier, UTType.utf8PlainText.identifier], isTargeted: $dropTarget, perform: receive)
+        .onChange(of: state.sections) { _, _ in confirmClear = false; search = ""; searching = false }
         .onChange(of: confirmClear) { _, shown in state.dialogPresented = shown }
         .onChange(of: state.keyboardSelecting) { _, selecting in
             if selecting { search = ""; searching = false }
@@ -288,7 +316,7 @@ struct HubView: View {
                     Image(systemName: "trash").frame(width: 20, height: 20)
                 }.help("Очистить весь буфер обмена").accessibilityLabel("Очистить весь буфер обмена")
                 Menu {
-                    if state.tab < 2 {
+                    if state.tab >= 0 && state.tab < 2 {
                         Button(searching ? "Скрыть поиск" : "Поиск") { searching.toggle(); if !searching { search = "" } }
                         Button("Очистить", role: .destructive) { clearClipboard = false; confirmClear = true }
                     }
@@ -302,7 +330,12 @@ struct HubView: View {
     private var content: some View {
         VStack(spacing: 3) {
             Group {
-                if let clip = state.previewClip {
+                if state.sections.isEmpty {
+                    VStack(spacing: 5) {
+                        Text("Разделы скрыты").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Button("Настройки…") { state.openSettings?() }.font(.system(size: 11)).buttonStyle(.plain)
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let clip = state.previewClip {
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Button { state.showPreview?(nil) } label: { Image(systemName: "chevron.left") }.help("Назад к списку")
@@ -310,7 +343,7 @@ struct HubView: View {
                             Spacer()
                             Button { store.copy(clip) } label: { Label("Копировать", systemImage: "doc.on.doc") }.font(.system(size: 11))
                         }.buttonStyle(.plain).padding(.horizontal, 5)
-                        ClipPreviewView(clip: clip, url: store.assetURL(clip)).id(clip.id)
+                        ClipPreviewView(clip: clip, url: store.assetURL(clip), backgroundOpacity: state.previewOpacity).id(clip.id)
                     }.padding(6).transition(.opacity)
                 } else {
                     switch state.tab {
@@ -320,13 +353,13 @@ struct HubView: View {
                     }
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            if !searching {
+            if !searching && !state.sections.isEmpty {
                 HStack(spacing: 4) {
                 Circle().fill(store.paused ? Color.orange : Color.green).frame(width: 4, height: 4)
                 Text(store.message ?? (store.paused ? "Буфер на паузе" : "Перетащи сюда · клик — копировать"))
                     .font(.system(size: 8)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
                 Spacer(minLength: 0)
-                if state.tab < 2 {
+                if state.tab >= 0 && state.tab < 2 {
                     Text("\((state.tab == 1 ? store.archive.shelf : store.archive.clips).count)/20")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
@@ -393,7 +426,7 @@ struct HubView: View {
                 Button("Предпросмотр") { state.showPreview?(clip) }
                 Button("Копировать") { store.copy(clip) }
                 if let url = store.assetURL(clip) { Button("Открыть") { NSWorkspace.shared.open(url) }; Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
-                if state.tab == 0 { Button("На полку") { var copy = clip; copy.id = UUID(); store.insert(copy, shelf: true) } }
+                if state.tab == 0 && state.sections.isEnabled(.shelf) { Button("На полку") { var copy = clip; copy.id = UUID(); store.insert(copy, shelf: true) } }
                 Button("Удалить", role: .destructive) { store.remove(clip) }
             }
     }
@@ -433,6 +466,7 @@ struct HubView: View {
         }.buttonStyle(.plain).padding(.horizontal, 4)
     }
     private func receive(_ providers: [NSItemProvider]) -> Bool {
+        guard state.sections.isEnabled(.clipboard) || state.sections.isEnabled(.shelf) else { store.message = "Включи Буфер или Полку в настройках"; return false }
         state.reveal?()
         for provider in providers.prefix(20) {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
@@ -442,21 +476,21 @@ struct HubView: View {
                     else if let value = item as? URL { url = value }
                     else if let value = item as? String { url = URL(string: value) }
                     else { url = nil }
-                    DispatchQueue.main.async { if let url { store.enqueueFile(url) } else { store.message = error?.localizedDescription ?? "Не удалось принять файл" } }
+                    DispatchQueue.main.async { if let url { store.enqueueFile(url, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять файл" } }
                 }
             } else if provider.canLoadObject(ofClass: NSImage.self) {
                 _ = provider.loadObject(ofClass: NSImage.self) { object, error in
                     let data = (object as? NSImage)?.tiffRepresentation
-                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
+                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
-                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
+                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
                 }
             } else {
                 _ = provider.loadObject(ofClass: NSString.self) { object, error in
                     let text = object as? String
-                    DispatchQueue.main.async { if let text { store.addText(text, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять текст" } }
+                    DispatchQueue.main.async { if let text { store.addText(text, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять текст" } }
                 }
             }
         }

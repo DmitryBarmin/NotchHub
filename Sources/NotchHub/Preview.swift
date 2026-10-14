@@ -8,6 +8,7 @@ import ImageIO
 struct ClipPreviewView: View {
     let clip: Clip
     let url: URL?
+    var backgroundOpacity: Double = 1
     var body: some View {
         Group {
             if let text = clip.text {
@@ -28,7 +29,7 @@ struct ClipPreviewView: View {
             } else { Text("Файл недоступен").foregroundStyle(.secondary) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color.black.opacity(0.18 * backgroundOpacity), in: RoundedRectangle(cornerRadius: 12))
         .clipShape(RoundedRectangle(cornerRadius: 12))
 
     }

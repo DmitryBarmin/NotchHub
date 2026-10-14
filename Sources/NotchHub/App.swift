@@ -11,10 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cycle = ClipboardCycle()
     var keyboardController: PanelController?
     var shortcutSettings: ShortcutSettings!
+    var sectionSettings: SectionSettings!
+    var layoutSettings: LayoutSettings!
     var settingsWindow: NSWindow?
     var shortcutMenuItem: NSMenuItem?
     func applicationDidFinishLaunching(_ notification: Notification) {
         store = HubStore(); clock = FocusClock()
+        sectionSettings = SectionSettings { [weak self] in self?.applySectionVisibility($0) }
+        layoutSettings = LayoutSettings { [weak self] layout in self?.controllers.forEach { $0.applyLayout(layout) } }
         configureScreens()
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.configureScreens() }
         hotKeys = ClipboardHotKeys(advance: { [weak self] in self?.advanceClipboard() }, finish: { [weak self] in self?.finishClipboard() }, shortcut: ClipboardShortcut.load())
@@ -50,10 +54,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controllers.forEach { $0.dispose() }
         controllers = NSScreen.screens.map {
             let state = HubState(); state.shortcut = hotKeys?.shortcut ?? ClipboardShortcut.load()
-            return PanelController(store: store, clock: clock, state: state, screen: $0)
+            state.applySectionVisibility(sectionSettings?.current ?? .all)
+            state.openSettings = { [weak self] in self?.showSettings() }
+            return PanelController(store: store, clock: clock, state: state, screen: $0, layout: layoutSettings?.current ?? .standard)
         }
     }
+    func applySectionVisibility(_ visibility: SectionVisibility) {
+        if !visibility.isEnabled(.clipboard) { cancelClipboard() }
+        if !visibility.isEnabled(.timer), clock.running { clock.pause() }
+        controllers.forEach { $0.applySectionVisibility(visibility) }
+    }
     func advanceClipboard() {
+        guard (sectionSettings?.current ?? .all).isEnabled(.clipboard) else {
+            cancelClipboard(); store.message = "Буфер скрыт — включи раздел в настройках"; return
+        }
         if keyboardController == nil {
             store.capture()
             guard store.pendingClipboardImports == 0 else {
@@ -102,9 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func showSettings() {
         cancelClipboard()
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 330), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: min(640, max(1, visible.width - 40)), height: min(540, max(1, visible.height - 60))), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "NotchHub — настройки"; window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings))
+            window.titlebarAppearsTransparent = true
+            window.contentMinSize = NSSize(width: min(500, max(1, visible.width - 40)), height: min(460, max(1, visible.height - 60)))
+            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings))
             window.center(); settingsWindow = window
         }
         NSApp.activate(ignoringOtherApps: true)
