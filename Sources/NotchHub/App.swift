@@ -39,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func advanceClipboard() {
         if keyboardController == nil {
             store.capture()
+            guard store.pendingClipboardImports == 0 else {
+                store.message = "Сохраняю новый буфер — повтори ⌘⌥V через мгновение"
+                return
+            }
             guard let controller = currentController else { return }
             keyboardController = controller
             cycle.begin(ids: store.archive.clips.map(\.id))
@@ -52,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func finishClipboard() {
         let id = cycle.finish()
-        if let id, let clip = store.archive.clips.first(where: { $0.id == id }) { store.copy(clip) }
+        if store.pendingClipboardImports == 0, let id, let clip = store.archive.clips.first(where: { $0.id == id }) { store.copy(clip) }
         endKeyboardSession()
     }
     func cancelClipboard() {
@@ -72,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func pause() { store.paused.toggle() }
     @objc func storage() { NSWorkspace.shared.open(store.root) }
     @objc func quit() { NSApp.terminate(nil) }
+    func applicationWillTerminate(_ notification: Notification) { store?.finishImports() }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
 }
 

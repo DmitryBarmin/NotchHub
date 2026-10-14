@@ -40,13 +40,16 @@ final class PanelController {
     let state: HubState
     let panel: IslandPanel
     private var screen: NSScreen?
-    private var hoverTimer: Timer?
+    private var pointerMonitor: Any?
+    private var localPointerMonitor: Any?
     private var escapeMonitor: Any?
     private var triggerArmed = true
+    private var hoverCheckPending = false
     init(store: HubStore, clock: FocusClock, state: HubState, screen: NSScreen) {
         self.state = state
         self.screen = screen
         panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.acceptsMouseMovedEvents = true
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.level = .statusBar; panel.hidesOnDeactivate = false; panel.isMovable = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -62,13 +65,27 @@ final class PanelController {
         }
         position()
         panel.orderFrontRegardless()
-        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { [weak self] _ in self?.checkHover() }
+        let pointerEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseUp, .rightMouseUp, .otherMouseUp]
+        pointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: pointerEvents) { [weak self] _ in self?.checkHover() }
+        localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: pointerEvents) { [weak self] event in
+            // Local monitors run before AppKit updates pressedMouseButtons on release.
+            if let self, !self.hoverCheckPending {
+                self.hoverCheckPending = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.hoverCheckPending = false
+                    self?.checkHover()
+                }
+            }
+            return event
+        }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { self?.state.pinned = false; self?.collapse(); return nil }; return event
         }
     }
     func dispose() {
-        hoverTimer?.invalidate()
+        if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }
+        if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
+        pointerMonitor = nil; localPointerMonitor = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         panel.orderOut(nil)
         state.reveal = nil
@@ -380,8 +397,8 @@ struct HubView: View {
             }
     }
     @ViewBuilder private func preview(_ clip: Clip) -> some View {
-        if clip.kind == .image, let url = store.assetURL(clip), let image = NSImage(contentsOf: url) {
-            Image(nsImage: image).resizable().scaledToFill()
+        if clip.kind == .image, let url = store.assetURL(clip) {
+            AssetImageView(url: url, maxPixelSize: 64, fill: true)
         } else if clip.kind == .file, let url = store.assetURL(clip) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().scaledToFit().padding(5)
         } else { Image(systemName: "text.alignleft").font(.system(size: 17)).foregroundStyle(accent) }
@@ -424,16 +441,16 @@ struct HubView: View {
                     else if let value = item as? URL { url = value }
                     else if let value = item as? String { url = URL(string: value) }
                     else { url = nil }
-                    DispatchQueue.main.async { if let url { store.addFile(url) } else { store.message = error?.localizedDescription ?? "Не удалось принять файл" } }
+                    DispatchQueue.main.async { if let url { store.enqueueFile(url) } else { store.message = error?.localizedDescription ?? "Не удалось принять файл" } }
                 }
             } else if provider.canLoadObject(ofClass: NSImage.self) {
                 _ = provider.loadObject(ofClass: NSImage.self) { object, error in
                     let data = (object as? NSImage)?.tiffRepresentation
-                    DispatchQueue.main.async { if let data { store.addImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
+                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
-                    DispatchQueue.main.async { if let data { store.addImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
+                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: true) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
                 }
             } else {
                 _ = provider.loadObject(ofClass: NSString.self) { object, error in

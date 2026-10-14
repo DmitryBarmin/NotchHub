@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Carbon
+import UniformTypeIdentifiers
 @testable import NotchHub
 
 final class StoreTests: XCTestCase {
@@ -125,6 +126,7 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(store.archive.clips.count, 20)
             XCTAssertEqual(store.archive.clips.first?.text, "item 10")
             store.setNote("сохрани мысль")
+            store.flushPendingNote()
             let restored = HubStore(root: root, monitor: false)
             XCTAssertEqual(restored.archive.clips, store.archive.clips)
             XCTAssertEqual(restored.archive.note, "сохрани мысль")
@@ -191,4 +193,152 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(pb.string(forType: .string), "hello")
         store.capture(); XCTAssertEqual(store.archive.clips.count, 1)
     }
+    func testNoteAutosaveCoalescesAndFlushesLatestText() throws {
+        try withStore { store, root in
+            store.addText("seed")
+            let saved = root.appendingPathComponent("history.json")
+            let before = try Data(contentsOf: saved)
+            for n in 0..<100 { store.setNote("note \(n)") }
+            XCTAssertTrue(store.noteSavePending)
+            XCTAssertEqual(try Data(contentsOf: saved), before)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.45))
+            XCTAssertFalse(store.noteSavePending)
+            XCTAssertEqual(HubStore(root: root, monitor: false).archive.note, "note 99")
+            store.setNote("final edit before quit")
+            store.finishImports()
+            XCTAssertEqual(HubStore(root: root, monitor: false).archive.note, "final edit before quit")
+        }
+    }
+    func testClockSchedulesOnlyWhileRunning() {
+        let clock = FocusClock()
+        XCTAssertFalse(clock.hasScheduledTick)
+        clock.start(); XCTAssertTrue(clock.hasScheduledTick)
+        clock.pause(); XCTAssertFalse(clock.hasScheduledTick)
+        clock.start(); clock.reset(); XCTAssertFalse(clock.hasScheduledTick)
+        let now = Date(); clock.start(now: now)
+        clock.tick(now: now.addingTimeInterval(1501))
+        XCTAssertFalse(clock.hasScheduledTick)
+    }
+    func testImageCacheDownsamplesAndReusesDecodedPixels() throws {
+        try withStore { store, _ in
+            let image = NSImage(size: NSSize(width: 1024, height: 512))
+            image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 1024, height: 512).fill(); image.unlockFocus()
+            store.addImage(try XCTUnwrap(image.tiffRepresentation))
+            let url = try XCTUnwrap(store.assetURL(try XCTUnwrap(store.archive.clips.first)))
+            let cache = AssetImageCache()
+            let first = try XCTUnwrap(cache.image(url: url, maxPixelSize: 64))
+            XCTAssertLessThanOrEqual(max(first.size.width, first.size.height), 64)
+            XCTAssertTrue(first === cache.image(url: url, maxPixelSize: 64))
+            XCTAssertNil(cache.image(url: url.appendingPathExtension("missing"), maxPixelSize: 64))
+        }
+    }
+    func testBackgroundImportsPreserveCopyOrderAndDoNotRestoreClearedHistory() throws {
+        try withStore { store, root in
+            let file = root.appendingPathComponent("file.txt")
+            try Data("owned file".utf8).write(to: file)
+            store.enqueueFile(file, shelf: false)
+            store.addText("newer")
+            store.setNote("keep latest note")
+            store.finishImports()
+            XCTAssertEqual(store.archive.clips.map(\.kind), [.text, .file])
+            XCTAssertEqual(store.archive.note, "keep latest note")
+            XCTAssertEqual(HubStore(root: root, monitor: false).archive.clips, store.archive.clips)
+            store.enqueueFile(file, shelf: false)
+            store.clear(shelf: false)
+            store.finishImports()
+            XCTAssertTrue(store.archive.clips.isEmpty)
+            XCTAssertEqual(store.archive.note, "keep latest note")
+            XCTAssertFalse(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).contains { $0.lastPathComponent.hasPrefix(".import-") })
+        }
+    }
+
+    func testBackgroundImageRetainsEncodedDataAndNativeClipboardType() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        let image = NSImage(size: NSSize(width: 32, height: 16))
+        image.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 32, height: 16).fill(); image.unlockFocus()
+        let data = try XCTUnwrap(image.tiffRepresentation)
+        store.enqueueImage(data)
+        store.finishImports()
+        let clip = try XCTUnwrap(store.archive.clips.first)
+        let url = try XCTUnwrap(store.assetURL(clip))
+        XCTAssertEqual(try Data(contentsOf: url), data)
+        store.copy(clip)
+        XCTAssertEqual(pb.data(forType: .tiff), data)
+        store.capture()
+        XCTAssertEqual(store.archive.clips.count, 1)
+    }
+
+    func testPendingClipboardImageCannotBeOverwrittenByHotKeyRelease() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        store.addText("old clipboard text")
+        let image = NSImage(size: NSSize(width: 32, height: 16))
+        image.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 32, height: 16).fill(); image.unlockFocus()
+        let data = try XCTUnwrap(image.tiffRepresentation)
+        pb.clearContents(); pb.setData(data, forType: .tiff)
+        let delegate = AppDelegate(); delegate.store = store
+        delegate.advanceClipboard()
+        XCTAssertEqual(store.pendingClipboardImports, 1)
+        XCTAssertNil(delegate.cycle.selectedID)
+        delegate.finishClipboard()
+        XCTAssertEqual(pb.data(forType: .tiff), data)
+        XCTAssertNil(pb.string(forType: .string))
+        store.finishImports()
+        XCTAssertEqual(store.pendingClipboardImports, 0)
+        XCTAssertEqual(store.archive.clips.first?.kind, .image)
+    }
+    func testJPEGCopyPublishesOriginalBytesWithoutTIFFExpansion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        let image = NSImage(size: NSSize(width: 512, height: 512))
+        image.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 512, height: 512).fill(); image.unlockFocus()
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        let jpeg = try XCTUnwrap(bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]))
+        store.addImage(jpeg)
+        store.copy(try XCTUnwrap(store.archive.clips.first))
+        XCTAssertEqual(pb.data(forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier)), jpeg)
+        // pb.types includes system-convertible TIFF; item.types is what we publish.
+        XCTAssertEqual(pb.pasteboardItems?.first?.types, [NSPasteboard.PasteboardType(UTType.jpeg.identifier)])
+        XCTAssertTrue(pb.canReadObject(forClasses: [NSImage.self], options: nil))
+        XCTAssertNotNil((pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?.first)
+    }
+    func testDecodeQueueIsSerialCoalescesRequestsAndSkipsCancelledWaiter() async throws {
+        let started = expectation(description: "first decoder started")
+        let gate = DispatchSemaphore(value: 0), statistics = NSLock()
+        var active = 0, maxActive = 0, decoded: [String] = []
+        let cache = AssetImageCache(decoder: { url, _ in
+            statistics.lock(); active += 1; maxActive = max(maxActive, active); decoded.append(url.path); statistics.unlock()
+            if url.path == "/first" { started.fulfill(); _ = gate.wait(timeout: .now() + 3) }
+            let image = NSImage(size: NSSize(width: 32, height: 32))
+            statistics.lock(); active -= 1; statistics.unlock()
+            return image
+        })
+        let first = Task { await cache.load(url: URL(fileURLWithPath: "/first"), maxPixelSize: 1400) }
+        await fulfillment(of: [started], timeout: 1)
+        let duplicate = Task { await cache.load(url: URL(fileURLWithPath: "/first"), maxPixelSize: 1400) }
+        let queued = Task { await cache.load(url: URL(fileURLWithPath: "/second"), maxPixelSize: 1400) }
+        let cancelled = Task { await cache.load(url: URL(fileURLWithPath: "/cancelled"), maxPixelSize: 1400) }
+        cancelled.cancel()
+        let cancelledImage = await cancelled.value
+        XCTAssertNil(cancelledImage)
+        let deadline = Date().addingTimeInterval(1)
+        while cache.pendingDecodeRequests < 3 && Date() < deadline { await Task.yield() }
+        XCTAssertEqual(cache.pendingDecodeRequests, 3)
+        gate.signal()
+        let firstImage = await first.value, duplicateImage = await duplicate.value
+        let secondImage = await queued.value
+        XCTAssertNotNil(secondImage)
+        XCTAssertTrue(firstImage === duplicateImage)
+        XCTAssertEqual(maxActive, 1)
+        XCTAssertEqual(decoded, ["/first", "/second"])
+        XCTAssertEqual(cache.pendingDecodeRequests, 0)
+    }
+
 }
