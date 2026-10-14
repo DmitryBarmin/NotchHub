@@ -310,9 +310,11 @@ struct HubView: View {
     }
     private var toolbar: some View {
         HStack(spacing: 3) {
+                if state.sections.showScreenshotButton {
                 Button { state.takeScreenshot?() } label: {
                     Image(systemName: "viewfinder").frame(width: 20, height: 20)
                 }.help("Сделать скриншот").accessibilityLabel("Сделать скриншот")
+                }
                 Button { state.pinned.toggle() } label: {
                     Image(systemName: state.pinned ? "pin.fill" : "pin").frame(width: 20, height: 20)
                 }.help("Оставить открытым")

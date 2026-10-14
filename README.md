@@ -39,8 +39,10 @@ NOTCHHUB_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk bash build.
 
 Для `swift test` требуется полный Xcode с XCTest. Новые проверки покрывают Retina-обрезку, направление выделения, экспорт скрытых областей, конфликт клавиш и локальное OCR.
 
-На Mac без XCTest доступны 16 локальных проверок без захвата личного экрана:
+На Mac без XCTest доступны 18 локальных проверок без захвата личного экрана:
 
 ```sh
 NOTCHHUB_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk bash scripts/check-screenshot.sh
 ```
+
+Настройки → Основные → Кнопка скриншотера: можно показать или скрыть кнопку в панели, не отключая сочетание клавиш и пункт меню. Панели захвата используют Clear Liquid Glass с полупрозрачной светлой обводкой.

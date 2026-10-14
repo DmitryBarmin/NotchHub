@@ -25,6 +25,10 @@ import Carbon
   check(board.data(forType:.png).flatMap(NSBitmapImageRep.init(data:))?.pixelsWide==100,"clipboard follows recrop")
   let name=UUID().uuidString;let defaults=UserDefaults(suiteName:name)!;defer { defaults.removePersistentDomain(forName:name) };var calls=0
   let settings=ScreenshotSettings(defaults:defaults,register:{_,_ in calls+=1;return calls==1 ? noErr : OSStatus(eventHotKeyExistsErr)},action:{})
+  let sections=SectionSettings(defaults:defaults)
+  sections.setScreenshotButton(enabled:false)
+  check(!SectionVisibility.load(from:defaults).showScreenshotButton,"screenshot button visibility persisted")
+  check(SectionVisibility.load(from:defaults).mask==15,"button preference preserves existing sections")
   let old=defaults.data(forKey:ScreenshotSettings.preferenceKey)
   check(!settings.apply(ClipboardShortcut(keyCode:UInt32(kVK_ANSI_8),modifiers:UInt32(cmdKey|shiftKey))),"conflict rejected")
   check(settings.current==ScreenshotSettings.standard && defaults.data(forKey:ScreenshotSettings.preferenceKey)==old,"conflict preserves shortcut")

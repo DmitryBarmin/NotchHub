@@ -227,12 +227,12 @@ final class ScreenshotCanvas: NSView {
         tools.isHidden = !editor.valid; actions.isHidden = !editor.valid
         guard editor.valid else { return }
         let r=editor.selection
-        let w: CGFloat=28, h: CGFloat=278
+        let w: CGFloat=28, h: CGFloat=160
         let right=r.maxX+6
         let x=right+w <= bounds.width-6 ? right : max(6,r.minX-w-6)
         let y=min(max(6,r.minY),max(6,bounds.height-h-6))
         tools.frame=CGRect(x:x,y:y,width:w,height:min(h,bounds.height-12))
-        let aw: CGFloat=126, ah: CGFloat=28
+        let aw: CGFloat=174, ah: CGFloat=28
         let ax=min(max(6,r.maxX-aw),max(6,bounds.width-aw-6))
         let ay=r.maxY+ah+12 <= bounds.height ? r.maxY+6 : max(6,r.minY-ah-6)
         actions.frame=CGRect(x:ax,y:ay,width:aw,height:ah)
@@ -298,25 +298,42 @@ struct ScreenshotGlassSurface: ViewModifier {
     func body(content: Content) -> some View {
         Group {
             if #available(macOS 26.0, *) {
-                content.glassEffect(.regular, in:RoundedRectangle(cornerRadius:8))
+                content.glassEffect(.clear.tint(.white.opacity(0.07)), in:RoundedRectangle(cornerRadius:12))
+                    .overlay { RoundedRectangle(cornerRadius:12).stroke(LinearGradient(colors:[.white.opacity(0.55),.white.opacity(0.08),.white.opacity(0.22)],startPoint:.topLeading,endPoint:.bottomTrailing),lineWidth:0.65) }
+                    .shadow(color:.black.opacity(0.18),radius:8,y:3)
             } else {
-                content.background(.ultraThinMaterial,in:RoundedRectangle(cornerRadius:8))
-                    .overlay { RoundedRectangle(cornerRadius:8).stroke(.white.opacity(0.18),lineWidth:0.5) }
+                content.background(.ultraThinMaterial,in:RoundedRectangle(cornerRadius:12))
+                    .overlay { RoundedRectangle(cornerRadius:12).stroke(.white.opacity(0.18),lineWidth:0.5) }
             }
         }
+    }
+}
+struct ScreenshotIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { ScreenshotIconButton(configuration:configuration) }
+}
+private struct ScreenshotIconButton: View {
+    let configuration: ButtonStyle.Configuration
+    @State private var hovered=false
+    var body: some View {
+        configuration.label
+            .background(.white.opacity(configuration.isPressed ? 0.18 : hovered ? 0.10 : 0),in:RoundedRectangle(cornerRadius:7))
+            .contentShape(RoundedRectangle(cornerRadius:7))
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .animation(.easeOut(duration:0.12),value:configuration.isPressed)
+            .onHover { hovered=$0 }
     }
 }
 struct ScreenshotToolbar: View {
     @ObservedObject var editor: ScreenshotEditor
     var body: some View {
         VStack(spacing:2) {
-            ForEach(ScreenshotTool.allCases) { tool in
+            ForEach([ScreenshotTool.pen, .line, .arrow, .rectangle, .marker, .text]) { tool in
                 Button { editor.tool=tool } label: {
                     Image(systemName:tool.icon).frame(width:20,height:20)
-                        .background(editor.tool==tool ? Color.blue.opacity(0.6) : .clear,in:RoundedRectangle(cornerRadius:4))
+                        .foregroundStyle(editor.tool == tool ? Color(red:0.45,green:0.77,blue:1) : .white.opacity(0.9))
+                        .background(editor.tool==tool ? Color.white.opacity(0.16) : .clear,in:RoundedRectangle(cornerRadius:7))
                 }.help(tool.title).accessibilityLabel(tool.title)
             }
-            Divider().padding(.horizontal,3)
             Menu {
                 Button("Красный") { editor.color = .red }
                 Button("Жёлтый") { editor.color = .yellow }
@@ -326,16 +343,9 @@ struct ScreenshotToolbar: View {
                 Button("Чёрный") { editor.color = .black }
             } label: { Circle().fill(editor.color).frame(width:14,height:14).frame(width:20,height:20) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Цвет").accessibilityLabel("Цвет рисунка")
-            Menu {
-                ForEach([CGFloat(2),3,6],id: \.self) { width in Button("Толщина \(Int(width))") { editor.width=width } }
-            } label: { Image(systemName:"lineweight").frame(width:20,height:20) }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Толщина линии")
-            Button { editor.undo() } label: {
-                Image(systemName:"arrow.uturn.backward").frame(width:20,height:20)
-            }.help("Отменить · " + EditorShortcutSettings.shared.shortcut(.undo).label).disabled(editor.annotations.isEmpty)
-        }.font(.system(size:11)).padding(4)
+        }.font(.system(size:11,weight:.medium)).padding(4)
         .modifier(ScreenshotGlassSurface())
-        .preferredColorScheme(.dark).buttonStyle(.plain)
+        .preferredColorScheme(.dark).buttonStyle(ScreenshotIconButtonStyle())
     }
 }
 struct ScreenshotActions: View {
@@ -343,6 +353,17 @@ struct ScreenshotActions: View {
     let save: () -> Void
     var body: some View {
         HStack(spacing:2) {
+            Button { editor.tool = .select } label: { Image(systemName:"crop").frame(width:22,height:20) }
+                .help("Изменить область").accessibilityLabel("Изменить область")
+            Button { editor.undo() } label: { Image(systemName:"arrow.uturn.backward").frame(width:22,height:20) }
+                .help("Отменить").accessibilityLabel("Отменить рисунок").disabled(editor.annotations.isEmpty)
+            Menu {
+                Button("Овал") { editor.tool = .ellipse }
+                Button("Скрыть область") { editor.tool = .redact }
+                Divider()
+                ForEach([CGFloat(2),3,6],id: \.self) { width in Button("Толщина \(Int(width))") { editor.width=width } }
+            } label: { Image(systemName:"ellipsis").frame(width:22,height:20) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Дополнительные инструменты")
             Button { editor.recognizeText() } label: {
                 Image(systemName:editor.recognizing ? "hourglass" : "text.viewfinder").frame(width:22,height:20)
             }.help(editor.message ?? "Распознать текст").accessibilityLabel("Распознать текст").disabled(editor.recognizing)
@@ -351,10 +372,9 @@ struct ScreenshotActions: View {
             Button { editor.copy() } label: { Image(systemName:"doc.on.doc").frame(width:22,height:20) }
                 .help("Копировать · " + EditorShortcutSettings.shared.shortcut(.copy).label).accessibilityLabel("Копировать скриншот")
             Button { editor.close?() } label: { Image(systemName:"xmark").frame(width:22,height:20) }.help("Отмена · Esc").accessibilityLabel("Отменить скриншот")
-            if editor.message != nil { Image(systemName:"exclamationmark.circle").foregroundStyle(.orange).help(editor.message ?? "") }
-        }.font(.system(size:11)).padding(4)
+        }.font(.system(size:11,weight:.medium)).padding(4)
         .modifier(ScreenshotGlassSurface())
-        .preferredColorScheme(.dark).buttonStyle(.plain)
+        .preferredColorScheme(.dark).buttonStyle(ScreenshotIconButtonStyle())
     }
 }
 final class ScreenshotWindow: NSWindow { override var canBecomeKey: Bool { true } }

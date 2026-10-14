@@ -32,6 +32,8 @@ enum HubSection: Int, CaseIterable, Identifiable {
 
 struct SectionVisibility: Equatable {
     var mask: Int = 15
+    var showScreenshotButton = true
+    static let screenshotButtonKey = "showScreenshotButton"
     static let all = SectionVisibility()
     static let preferenceKey = "visibleHubSections"
     var firstVisible: HubSection? { HubSection.allCases.first { isEnabled($0) } }
@@ -39,8 +41,9 @@ struct SectionVisibility: Equatable {
     func isEnabled(_ section: HubSection) -> Bool { mask & (1 << section.rawValue) != 0 }
     func isEnabled(tab: Int) -> Bool { HubSection(rawValue: tab).map(isEnabled) ?? false }
     static func load(from defaults: UserDefaults) -> SectionVisibility {
-        guard let mask = defaults.object(forKey: preferenceKey) as? Int, (0...15).contains(mask) else { return .all }
-        return SectionVisibility(mask: mask)
+        let mask = defaults.object(forKey: preferenceKey) as? Int
+        return SectionVisibility(mask: mask.map { (0...15).contains($0) ? $0 : 15 } ?? 15,
+                                 showScreenshotButton: defaults.object(forKey: screenshotButtonKey) as? Bool ?? true)
     }
 }
 
@@ -50,6 +53,12 @@ final class SectionSettings: ObservableObject {
     private let changed: (SectionVisibility) -> Void
     init(defaults: UserDefaults = .standard, changed: @escaping (SectionVisibility) -> Void = { _ in }) {
         self.defaults = defaults; self.changed = changed; current = SectionVisibility.load(from: defaults)
+    }
+    func setScreenshotButton(enabled: Bool) {
+        guard current.showScreenshotButton != enabled else { return }
+        current.showScreenshotButton = enabled
+        defaults.set(enabled, forKey: SectionVisibility.screenshotButtonKey)
+        changed(current)
     }
     func set(_ section: HubSection, enabled: Bool) {
         var updated = current

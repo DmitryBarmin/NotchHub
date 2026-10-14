@@ -159,6 +159,18 @@ struct ShortcutSettingsView: View {
                                 .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         }
                     }
+                    Divider().padding(.vertical, 10)
+                    HStack(spacing: 12) {
+                        Image(systemName: "viewfinder").font(.system(size: 16)).foregroundStyle(.blue)
+                            .frame(width: 32, height: 32).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Кнопка скриншотера").font(.system(size: 13, weight: .medium))
+                            Text("Показывать кнопку захвата в панели NotchHub").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("Кнопка скриншотера", isOn: Binding(get: { sections.current.showScreenshotButton }, set: { sections.setScreenshotButton(enabled: $0) }))
+                            .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
                 }
             }
         }
