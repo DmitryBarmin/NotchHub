@@ -228,13 +228,15 @@ final class ScreenshotCanvas: NSView {
         guard editor.valid else { return }
         let r=editor.selection
         let w: CGFloat=28, h: CGFloat=160
-        let right=r.maxX+6
-        let x=right+w <= bounds.width-6 ? right : max(6,r.minX-w-6)
-        let y=min(max(6,r.minY),max(6,bounds.height-h-6))
-        tools.frame=CGRect(x:x,y:y,width:w,height:min(h,bounds.height-12))
         let aw: CGFloat=174, ah: CGFloat=28
+        let actionsBelow=r.maxY+ah+12 <= bounds.height
         let ax=min(max(6,r.maxX-aw),max(6,bounds.width-aw-6))
-        let ay=r.maxY+ah+12 <= bounds.height ? r.maxY+6 : max(6,r.minY-ah-6)
+        let ay=actionsBelow ? r.maxY+6 : max(6,r.maxY-ah-6)
+        let right=r.maxX+6
+        let x=right+w <= bounds.width-6 ? right : max(6,r.maxX-w-6)
+        let bottom=actionsBelow ? r.maxY : ay-6
+        let y=min(max(6,bottom-h),max(6,bounds.height-h-6))
+        tools.frame=CGRect(x:x,y:y,width:w,height:min(h,bounds.height-12))
         actions.frame=CGRect(x:ax,y:ay,width:aw,height:ah)
         needsDisplay = true
     }
