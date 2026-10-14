@@ -17,6 +17,9 @@ import Carbon
   rep=NSBitmapImageRep(cgImage:editor.exportedImage()!)
   check(rep.colorAt(x:20,y:20)!.usingColorSpace(.deviceRGB)!.redComponent<0.1,"redaction position")
   check(rep.colorAt(x:100,y:20)!.usingColorSpace(.deviceRGB)!.redComponent>0.9,"redaction leaves rest untouched")
+  editor.annotations=[ScreenshotAnnotation(tool:.rectangle,points:[CGPoint(x:5,y:5),CGPoint(x:15,y:15)],color:.green,width:3)]
+  let outlined=NSBitmapImageRep(cgImage:editor.exportedImage()!)
+  check(outlined.colorAt(x:20,y:10)!.usingColorSpace(.deviceRGB)!.greenComponent>0.9,"selected outline color exported")
   let board=NSPasteboard.withUniqueName();defer { board.releaseGlobally() }
   editor.writeClipboard(to:board)
   let copied=board.data(forType:.png).flatMap(NSBitmapImageRep.init(data:))

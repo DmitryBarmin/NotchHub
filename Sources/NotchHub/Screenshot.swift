@@ -79,7 +79,7 @@ struct ScreenshotAnnotation {
 }
 private extension NSBezierPath { func withWidth(_ width: CGFloat) -> NSBezierPath { lineWidth = width; return self } }
 
-final class ScreenshotEditor: ObservableObject {
+final class ScreenshotEditor: NSObject, ObservableObject {
     let image: CGImage
     let size: CGSize
     @Published var selection = CGRect.zero
@@ -92,7 +92,25 @@ final class ScreenshotEditor: ObservableObject {
     var close: (() -> Void)?
     var changed: (() -> Void)?
     var textWindow: NSWindow?
-    init(image: CGImage, size: CGSize) { self.image = image; self.size = size }
+    init(image: CGImage, size: CGSize) { self.image = image; self.size = size; super.init() }
+    private var ownsColorPanel = false
+    func chooseColor() {
+        let panel = NSColorPanel.shared
+        panel.color = NSColor(color)
+        panel.showsAlpha = false; panel.isContinuous = true
+        panel.setTarget(self); panel.setAction(#selector(colorChanged(_:)))
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+        ownsColorPanel = true
+        NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
+    }
+    @objc func colorChanged(_ panel: NSColorPanel) {
+        color = Color(nsColor: panel.color); changed?()
+    }
+    func closeColorPanel() {
+        guard ownsColorPanel else { return }
+        NSColorPanel.shared.setTarget(nil); NSColorPanel.shared.setAction(nil); NSColorPanel.shared.close()
+        ownsColorPanel = false
+    }
     var valid: Bool { selection.width >= 3 && selection.height >= 3 }
     func exportedImage(annotated: Bool = true) -> CGImage? {
         guard valid else { return nil }
@@ -119,7 +137,7 @@ final class ScreenshotEditor: ObservableObject {
         guard let png = rep.representation(using: .png, properties: [:]) else { return }
         pasteboard.clearContents(); pasteboard.setData(png, forType: .png)
     }
-    func copy() {
+    func copyScreenshot() {
         writeClipboard(); close?()
     }
     func undo() {
@@ -227,7 +245,7 @@ final class ScreenshotCanvas: NSView {
         tools.isHidden = !editor.valid; actions.isHidden = !editor.valid
         guard editor.valid else { return }
         let r=editor.selection
-        let w: CGFloat=28, h: CGFloat=160
+        let w: CGFloat=28, h: CGFloat=168
         let aw: CGFloat=174, ah: CGFloat=28
         let actionsBelow=r.maxY+ah+12 <= bounds.height
         let ax=min(max(6,r.maxX-aw),max(6,bounds.width-aw-6))
@@ -286,13 +304,13 @@ final class ScreenshotCanvas: NSView {
         if event.keyCode == 53 { editor.close?(); return }
         if let action=EditorShortcutSettings.shared.action(for:event) {
             switch action {
-            case .copy: editor.copy()
+            case .copy: editor.copyScreenshot()
             case .save: editor.save(in:window)
             case .undo: editor.undo()
             case .selectAll: editor.selection=bounds;updateTools();editor.writeClipboard()
             case .recognize: editor.recognizeText()
             }
-        } else if event.keyCode == 36 { editor.copy() }
+        } else if event.keyCode == 36 { editor.copyScreenshot() }
         else { super.keyDown(with:event) }
     }
 }
@@ -336,15 +354,13 @@ struct ScreenshotToolbar: View {
                         .background(editor.tool==tool ? Color.white.opacity(0.16) : .clear,in:RoundedRectangle(cornerRadius:7))
                 }.help(tool.title).accessibilityLabel(tool.title)
             }
-            Menu {
-                Button("Красный") { editor.color = .red }
-                Button("Жёлтый") { editor.color = .yellow }
-                Button("Зелёный") { editor.color = .green }
-                Button("Синий") { editor.color = .blue }
-                Button("Белый") { editor.color = .white }
-                Button("Чёрный") { editor.color = .black }
-            } label: { Circle().fill(editor.color).frame(width:14,height:14).frame(width:20,height:20) }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Цвет").accessibilityLabel("Цвет рисунка")
+            Button { editor.chooseColor() } label: {
+                Image(systemName:"paintpalette").frame(width:20,height:20)
+                    .overlay(alignment:.bottomTrailing) {
+                        Circle().fill(editor.color).frame(width:7,height:7)
+                            .overlay { Circle().stroke(.white.opacity(0.8),lineWidth:0.7) }
+                    }
+            }.help("Выбрать цвет обводки и рисунка").accessibilityLabel("Выбрать цвет обводки")
         }.font(.system(size:11,weight:.medium)).padding(4)
         .modifier(ScreenshotGlassSurface())
         .preferredColorScheme(.dark).buttonStyle(ScreenshotIconButtonStyle())
@@ -371,7 +387,7 @@ struct ScreenshotActions: View {
             }.help(editor.message ?? "Распознать текст").accessibilityLabel("Распознать текст").disabled(editor.recognizing)
             Button { save() } label: { Image(systemName:"square.and.arrow.down").frame(width:22,height:20) }
                 .help("Сохранить · " + EditorShortcutSettings.shared.shortcut(.save).label).accessibilityLabel("Сохранить скриншот")
-            Button { editor.copy() } label: { Image(systemName:"doc.on.doc").frame(width:22,height:20) }
+            Button { editor.copyScreenshot() } label: { Image(systemName:"doc.on.doc").frame(width:22,height:20) }
                 .help("Копировать · " + EditorShortcutSettings.shared.shortcut(.copy).label).accessibilityLabel("Копировать скриншот")
             Button { editor.close?() } label: { Image(systemName:"xmark").frame(width:22,height:20) }.help("Отмена · Esc").accessibilityLabel("Отменить скриншот")
         }.font(.system(size:11,weight:.medium)).padding(4)
@@ -420,7 +436,7 @@ final class ScreenshotController {
         }
     }
     func finish() {
-        editors.forEach { $0.close=nil; $0.textWindow?.close() };windows.forEach { $0.orderOut(nil);$0.close() }
+        editors.forEach { $0.close=nil; $0.closeColorPanel(); $0.textWindow?.close() };windows.forEach { $0.orderOut(nil);$0.close() }
         editors.removeAll();windows.removeAll();active=false;finished()
     }
 }
