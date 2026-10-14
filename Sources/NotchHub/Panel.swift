@@ -30,6 +30,7 @@ final class HubState: ObservableObject {
     var hide: (() -> Void)?
     var showPreview: ((Clip?) -> Void)?
     var openSettings: (() -> Void)?
+    var takeScreenshot: (() -> Void)?
     @discardableResult func applySectionVisibility(_ visibility: SectionVisibility) -> Bool {
         sections = visibility
         guard !visibility.isEnabled(tab: tab) else { return false }
@@ -309,6 +310,9 @@ struct HubView: View {
     }
     private var toolbar: some View {
         HStack(spacing: 3) {
+                Button { state.takeScreenshot?() } label: {
+                    Image(systemName: "viewfinder").frame(width: 20, height: 20)
+                }.help("Сделать скриншот").accessibilityLabel("Сделать скриншот")
                 Button { state.pinned.toggle() } label: {
                     Image(systemName: state.pinned ? "pin.fill" : "pin").frame(width: 20, height: 20)
                 }.help("Оставить открытым")

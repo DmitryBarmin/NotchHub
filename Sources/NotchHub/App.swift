@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Carbon
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var status: NSStatusItem!
@@ -13,10 +14,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var shortcutSettings: ShortcutSettings!
     var sectionSettings: SectionSettings!
     var layoutSettings: LayoutSettings!
+    var screenshotSettings: ScreenshotSettings!
+    var previewSettings: ScreenshotSettings!
+    var screenshotController: ScreenshotController!
     var settingsWindow: NSWindow?
     var shortcutMenuItem: NSMenuItem?
     func applicationDidFinishLaunching(_ notification: Notification) {
         store = HubStore(); clock = FocusClock()
+        screenshotController = ScreenshotController { [weak self] in self?.configureScreens() }
+        screenshotSettings = ScreenshotSettings { [weak self] in self?.takeScreenshot() }
+        previewSettings = ScreenshotSettings(preferenceKey: "previewShortcut", standard: ClipboardShortcut(keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | optionKey)), signature: 0x4E485056,
+            released: { [weak self] in self?.hideKeyboardPreview() }, action: { [weak self] in self?.showKeyboardPreview() })
         sectionSettings = SectionSettings { [weak self] in self?.applySectionVisibility($0) }
         layoutSettings = LayoutSettings { [weak self] layout in self?.controllers.forEach { $0.applyLayout(layout) } }
         configureScreens()
@@ -39,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let shortcut = NSMenuItem(title: "Буфер: " + hotKeys.shortcut.instruction, action: nil, keyEquivalent: "")
         shortcutMenuItem = shortcut
         menu.addItem(shortcut)
+        item("Сделать скриншот", action: #selector(takeScreenshot), menu: menu)
         item("Настройки…", action: #selector(showSettings), menu: menu)
         item("Пауза / продолжить запись буфера", action: #selector(pause), menu: menu)
         item("Открыть папку хранения", action: #selector(storage), menu: menu)
@@ -50,12 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     var currentController: PanelController? { controllers.first(where: { $0.contains(NSEvent.mouseLocation) }) ?? controllers.first }
     func configureScreens() {
+        guard screenshotController?.active != true else { return }
         if keyboardController != nil { cancelClipboard() }
         controllers.forEach { $0.dispose() }
         controllers = NSScreen.screens.map {
             let state = HubState(); state.shortcut = hotKeys?.shortcut ?? ClipboardShortcut.load()
             state.applySectionVisibility(sectionSettings?.current ?? .all)
             state.openSettings = { [weak self] in self?.showSettings() }
+            state.takeScreenshot = { [weak self] in self?.takeScreenshot() }
             return PanelController(store: store, clock: clock, state: state, screen: $0, layout: layoutSettings?.current ?? .standard)
         }
     }
@@ -83,8 +94,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.expand()
         } else { cycle.advance() }
         keyboardController?.state.selectedClipboardID = cycle.selectedID
+        if keyboardController?.state.previewClip != nil { showKeyboardPreview() }
         store.message = cycle.selectedID == nil ? "Буфер пуст" : (hotKeys.error ?? "Отпусти \(hotKeys.shortcut.primaryLabel) — выбрать · затем ⌘V — вставить")
     }
+    func showKeyboardPreview() {
+        guard let controller = keyboardController, let id = cycle.selectedID, let clip = store.archive.clips.first(where: { $0.id == id }) else { return }
+        controller.state.showPreview?(clip)
+    }
+    func hideKeyboardPreview() { keyboardController?.state.showPreview?(nil) }
     func finishClipboard() {
         let id = cycle.finish()
         if store.pendingClipboardImports == 0, let id, let clip = store.archive.clips.first(where: { $0.id == id }) { store.copy(clip) }
@@ -96,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endKeyboardSession()
     }
     func endKeyboardSession() {
+        hideKeyboardPreview()
         guard let controller = keyboardController else { return }
         controller.state.keyboardSelecting = false
         controller.state.selectedClipboardID = nil
@@ -108,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem(title: "NotchHub", action: nil, keyEquivalent: "")
         let appMenu = NSMenu(title: "NotchHub")
+        item("Сделать скриншот", action: #selector(takeScreenshot), menu: appMenu)
         item("Настройки…", action: #selector(showSettings), menu: appMenu, key: ",")
         appMenu.addItem(.separator())
         item("Выйти из NotchHub", action: #selector(quit), menu: appMenu, key: "q")
@@ -121,11 +140,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "NotchHub — настройки"; window.isReleasedWhenClosed = false
             window.titlebarAppearsTransparent = true
             window.contentMinSize = NSSize(width: min(500, max(1, visible.width - 40)), height: min(460, max(1, visible.height - 60)))
-            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings))
+            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings, screenshots: screenshotSettings, previews: previewSettings))
             window.center(); settingsWindow = window
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+    @objc func takeScreenshot() {
+        guard !screenshotController.active else { return }
+        cancelClipboard()
+        settingsWindow?.orderOut(nil)
+        controllers.forEach { $0.dispose() }; controllers.removeAll()
+        screenshotController.start()
     }
     @objc func pause() { store.paused.toggle() }
     @objc func storage() { NSWorkspace.shared.open(store.root) }

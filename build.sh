@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-swift build -c release
+# macOS 27 SDK's SwiftUI macros require full Xcode; allow a matching installed SDK.
+SWIFT_ARGS=()
+if [[ -n "${NOTCHHUB_SDK:-}" ]]; then SWIFT_ARGS+=(--sdk "$NOTCHHUB_SDK"); fi
+swift build -c release "${SWIFT_ARGS[@]}"
 APP="$PWD/dist/NotchHub.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/NotchHub "$APP/Contents/MacOS/NotchHub"
@@ -13,8 +16,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.notchhub.app</string>
 <key>CFBundleName</key><string>NotchHub</string>
 <key>CFBundleDisplayName</key><string>NotchHub</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>1.2</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>1.3</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>

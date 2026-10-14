@@ -12,3 +12,5 @@ xcuserdata/
 .env
 .env.*
 *.log
+
+.build-26/

@@ -96,9 +96,13 @@ struct ShortcutSettingsView: View {
     @ObservedObject var settings: ShortcutSettings
     @ObservedObject var sections: SectionSettings
     @ObservedObject var layout: LayoutSettings
+    @ObservedObject var screenshots: ScreenshotSettings
+    @ObservedObject var previews: ScreenshotSettings
     @State private var draft: ClipboardShortcut
     @State private var page = 0
-    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings) {
+    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings) {
+        self.previews = previews
+        self.screenshots = screenshots
         self.settings = settings; self.sections = sections; self.layout = layout; _draft = State(initialValue: settings.current)
     }
     private func modifier(_ flag: UInt32) -> Binding<Bool> {
@@ -125,7 +129,7 @@ struct ShortcutSettingsView: View {
                     switch page {
                     case 0: sectionsCard
                     case 1: LayoutSettingsView(settings: layout)
-                    default: shortcutCard
+                    default: VStack(spacing: 16) { shortcutCard; ScreenshotShortcutCard(settings: previews, title: "Предпросмотр буфера", detail: "При переключении буфера удерживай эту комбинацию. Отпусти клавишу — предпросмотр скроется."); ScreenshotShortcutCard(settings: screenshots); EditorShortcutCard() }
                     }
                 }.padding(.vertical, 2)
             }.scrollIndicators(.hidden)
