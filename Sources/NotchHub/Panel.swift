@@ -51,13 +51,29 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Receives tracking-area events, which the window server sends only while the
+/// pointer is over our windows — unlike a global monitor that wakes on every move.
+final class HoverTracker: NSResponder {
+    var changed: (() -> Void)?
+    override func mouseEntered(with event: NSEvent) { changed?() }
+    override func mouseExited(with event: NSEvent) { changed?() }
+    override func mouseMoved(with event: NSEvent) { changed?() }
+    func track(_ view: NSView) {
+        view.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+    }
+}
+
 final class PanelController {
     let state: HubState
     let panel: IslandPanel
     private var screen: NSScreen?
     private var layout = HubLayoutPreferences.standard
     private var pointerMonitor: Any?
+    private var pointerMonitorTracksMoves = false
     private var localPointerMonitor: Any?
+    private let tracker = HoverTracker()
+    /// Top-edge strip for layouts where the island sits below the screen edge.
+    private let edgePanel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var escapeMonitor: Any?
     private var triggerArmed = true
     private var hoverCheckPending = false
@@ -73,6 +89,13 @@ final class PanelController {
         let hosting = NSHostingView(rootView: HubView(store: store, clock: clock, state: state))
         hosting.sizingOptions = []
         panel.contentView = hosting
+        tracker.changed = { [weak self] in self?.scheduleHoverCheck() }
+        tracker.track(hosting)
+        edgePanel.isOpaque = false; edgePanel.backgroundColor = .clear; edgePanel.hasShadow = false
+        edgePanel.level = .statusBar; edgePanel.hidesOnDeactivate = false; edgePanel.isMovable = false
+        edgePanel.collectionBehavior = panel.collectionBehavior
+        edgePanel.contentView = NSView()
+        tracker.track(edgePanel.contentView!)
         state.reveal = { [weak self] in self?.expand() }
         state.hide = { [weak self] in self?.collapse() }
         state.showPreview = { [weak self] clip in
@@ -82,21 +105,35 @@ final class PanelController {
         }
         position()
         panel.orderFrontRegardless()
-        let pointerEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseUp, .rightMouseUp, .otherMouseUp]
-        pointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: pointerEvents) { [weak self] _ in self?.checkHover() }
-        localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: pointerEvents) { [weak self] event in
-            // Local monitors run before AppKit updates pressedMouseButtons on release.
-            if let self, !self.hoverCheckPending {
-                self.hoverCheckPending = true
-                DispatchQueue.main.async { [weak self] in
-                    self?.hoverCheckPending = false
-                    self?.checkHover()
-                }
-            }
-            return event
+        updatePointerMonitor()
+        localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: Self.pointerEvents) { [weak self] event in
+            self?.scheduleHoverCheck(); return event
         }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.state.pinned = false; self?.collapse(); return nil }; return event
+            // Only Esc aimed at the hub; settings and dialog windows keep their own Esc.
+            guard let self, event.keyCode == 53, event.window === self.panel else { return event }
+            self.state.pinned = false; self.collapse(); return nil
+        }
+    }
+    private static let pointerEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseUp, .rightMouseUp, .otherMouseUp]
+    /// Global mouse-move delivery wakes the app on every pointer move system-wide, so it
+    /// runs only while expanded; collapsed hover comes from tracking areas. Drags stay
+    /// global so dropping a file onto the island still opens it.
+    private func updatePointerMonitor() {
+        let tracksMoves = state.expanded
+        guard pointerMonitor == nil || tracksMoves != pointerMonitorTracksMoves else { return }
+        if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }
+        let mask = tracksMoves ? Self.pointerEvents : Self.pointerEvents.subtracting(.mouseMoved)
+        pointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in self?.checkHover() }
+        pointerMonitorTracksMoves = tracksMoves
+    }
+    private func scheduleHoverCheck() {
+        // Local events arrive before AppKit updates pressedMouseButtons on release.
+        guard !hoverCheckPending else { return }
+        hoverCheckPending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.hoverCheckPending = false
+            self?.checkHover()
         }
     }
     func dispose() {
@@ -104,6 +141,9 @@ final class PanelController {
         if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
         pointerMonitor = nil; localPointerMonitor = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        escapeMonitor = nil
+        tracker.changed = nil
+        edgePanel.orderOut(nil)
         panel.orderOut(nil)
         state.reveal = nil
         state.hide = nil
@@ -126,6 +166,10 @@ final class PanelController {
         state.topOffset = geometry.topOffset; state.triggerWidth = geometry.triggerWidth
         state.panelOpacity = layout.panelOpacity; state.previewOpacity = layout.previewOpacity
         resize(expanded: state.expanded, animate: false)
+        if geometry.topOffset > 0 {
+            edgePanel.setFrame(NSRect(x: screen.frame.midX - geometry.triggerWidth / 2, y: screen.frame.maxY - 2, width: geometry.triggerWidth, height: 2), display: false)
+            edgePanel.orderFrontRegardless()
+        } else { edgePanel.orderOut(nil) }
     }
     private func resize(expanded: Bool, animate: Bool) {
         guard let screen else { return }
@@ -139,10 +183,12 @@ final class PanelController {
         guard !state.expanded else { return }
         resize(expanded: true, animate: false)
         withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) { state.expanded = true }
+        updatePointerMonitor()
     }
     func collapse() {
         guard state.expanded else { return }
         withAnimation(.easeOut(duration: 0.12)) { state.expanded = false }
+        updatePointerMonitor()
         panel.resignKey()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, !self.state.expanded else { return }

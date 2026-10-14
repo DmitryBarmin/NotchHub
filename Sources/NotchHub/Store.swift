@@ -55,7 +55,7 @@ final class HubStore: ObservableObject {
         } catch { message = "Не удалось прочитать историю: \(error.localizedDescription)" }
         if monitor {
             pollTimer = Timer.scheduledTimer(withTimeInterval: 0.65, repeats: true) { [weak self] _ in self?.capture() }
-            pollTimer?.tolerance = 0.1
+            pollTimer?.tolerance = 0.3  // let macOS coalesce wakeups with other timers
         }
     }
     deinit { pollTimer?.invalidate(); noteSaveTimer?.invalidate(); if noteSavePending { save() } }
