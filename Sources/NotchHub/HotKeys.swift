@@ -24,11 +24,20 @@ final class ClipboardHotKeys {
     private let finish: () -> Void
     private let modifiers: () -> UInt32
     private(set) var error: String?
+    var sessionActive: Bool { releaseTimer != nil }
     private let signature: OSType = 0x4E484342
-    init(advance: @escaping () -> Void, finish: @escaping () -> Void, modifiers: @escaping () -> UInt32 = { GetCurrentKeyModifiers() }) {
+    private(set) var shortcut: ClipboardShortcut
+    typealias Registration = (ClipboardShortcut, UInt32, inout EventHotKeyRef?) -> OSStatus
+    private let register: Registration
+    static func registerNative(_ shortcut: ClipboardShortcut, id: UInt32, reference: inout EventHotKeyRef?) -> OSStatus {
+        RegisterEventHotKey(shortcut.keyCode, shortcut.modifiers, EventHotKeyID(signature: 0x4E484342, id: id), GetApplicationEventTarget(), 0, &reference)
+    }
+    init(advance: @escaping () -> Void, finish: @escaping () -> Void, shortcut: ClipboardShortcut = .standard, register: @escaping Registration = ClipboardHotKeys.registerNative, modifiers: @escaping () -> UInt32 = { GetCurrentKeyModifiers() }) {
         self.advance = advance
         self.finish = finish
         self.modifiers = modifiers
+        self.shortcut = shortcut.isValid ? shortcut : .standard
+        self.register = register
         var specification = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
             guard let event, let context else { return OSStatus(eventNotHandledErr) }
@@ -40,15 +49,30 @@ final class ClipboardHotKeys {
             return noErr
         }, 1, &specification, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard installed == noErr else { error = "Не удалось включить горячую клавишу (\(installed))"; return }
-        let result = RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey | optionKey), EventHotKeyID(signature: signature, id: 1), GetApplicationEventTarget(), 0, &initialKey)
-        if result != noErr { error = "⌘⌥V занято другим приложением (\(result))" }
+        let result = register(self.shortcut, 1, &initialKey)
+        if result != noErr { error = "\(self.shortcut.label) занято или недоступно (\(result))" }
     }
-    private func pressed() {
+    @discardableResult func rebind(to candidate: ClipboardShortcut) -> Bool {
+        guard candidate.isValid else { error = candidate.validationMessage; return false }
+        if candidate == shortcut && initialKey != nil { error = nil; return true }
+        var replacement: EventHotKeyRef?
+        let result = register(candidate, 1, &replacement)
+        guard result == noErr else { error = "\(candidate.label) занято или недоступно (\(result)). Прежняя комбинация сохранена."; return false }
+        cancelSession()
+        if let initialKey { UnregisterEventHotKey(initialKey) }
+        initialKey = replacement; shortcut = candidate; error = nil
+        return true
+    }
+    func pressed() {
         if releaseTimer == nil {
-            let result = RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey), EventHotKeyID(signature: signature, id: 2), GetApplicationEventTarget(), 0, &sessionKey)
-            if result != noErr { error = "Повторяй ⌘⌥V: ⌘V недоступно (\(result))" }
+            error = nil
+            if shortcut.modifiers != shortcut.primaryModifier {
+                let sessionShortcut = ClipboardShortcut(keyCode: shortcut.keyCode, modifiers: shortcut.primaryModifier)
+                let result = register(sessionShortcut, 2, &sessionKey)
+                if result != noErr { error = "Повторяй \(shortcut.label): \(sessionShortcut.label) недоступно (\(result))" }
+            }
             releaseTimer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in
-                guard let self, (self.modifiers() & UInt32(cmdKey)) == 0 else { return }
+                guard let self, (self.modifiers() & self.shortcut.primaryModifier) == 0 else { return }
                 self.cancelSession()
                 self.finish()
             }

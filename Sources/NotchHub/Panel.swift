@@ -3,6 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class HubState: ObservableObject {
+    @Published var shortcut = ClipboardShortcut.standard
     @Published var expanded = false
     @Published var pinned = false
     @Published var dialogPresented = false
@@ -244,7 +245,7 @@ struct HubView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { state.reveal?() }
                     .accessibilityLabel(store.archive.clips.isEmpty ? "Буфер пуст" : "В буфере \(store.archive.clips.count) элементов")
-                    .help("NotchHub · верхний край — раскрыть · ⌘⌥V — переключать буфер")
+                    .help("NotchHub · верхний край — раскрыть · \(state.shortcut.label) — переключать буфер")
             }
         }
         .overlay(alignment: .topLeading) {

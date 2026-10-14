@@ -341,4 +341,98 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(cache.pendingDecodeRequests, 0)
     }
 
+    func testShortcutPreferencePersistenceValidationAndConflictRollback() throws {
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
+        let candidate = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(controlKey | optionKey))
+        let conflict = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | shiftKey))
+        var changed = 0, registrations = 0
+        let hotKeys = ClipboardHotKeys(advance: {}, finish: {}, register: { shortcut, _, _ in
+            registrations += 1
+            return shortcut == conflict ? OSStatus(-9878) : noErr
+        })
+        let settings = ShortcutSettings(hotKeys: hotKeys, defaults: defaults) { _ in changed += 1 }
+        XCTAssertTrue(settings.apply(candidate))
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), candidate)
+        XCTAssertEqual(hotKeys.shortcut, candidate)
+        XCTAssertFalse(settings.apply(conflict))
+        XCTAssertNotNil(settings.message)
+        XCTAssertEqual(hotKeys.shortcut, candidate)
+        XCTAssertEqual(settings.current, candidate)
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), candidate)
+        XCTAssertEqual(changed, 1)
+        let calls = registrations
+        XCTAssertFalse(settings.apply(ClipboardShortcut(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(shiftKey))))
+        XCTAssertEqual(registrations, calls)
+        XCTAssertTrue(settings.apply(.standard))
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
+        defaults.set(Data("broken".utf8), forKey: ClipboardShortcut.preferenceKey)
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
+    }
+    func testChosenPrimaryModifierControlsCommitAndRebindingCancelsSession() {
+        let shortcut = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(controlKey | optionKey))
+        var held = UInt32(controlKey), presses = 0, commits = 0
+        var registered: [ClipboardShortcut] = []
+        let hotKeys = ClipboardHotKeys(advance: { presses += 1 }, finish: { commits += 1 }, shortcut: shortcut, register: { value, _, _ in
+            registered.append(value); return noErr
+        }, modifiers: { held })
+        hotKeys.pressed(); hotKeys.pressed()
+        XCTAssertEqual(presses, 2)
+        XCTAssertEqual(registered.last, ClipboardShortcut(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(controlKey)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 0)
+        held = UInt32(optionKey)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 1)
+        XCTAssertFalse(hotKeys.sessionActive)
+        held = UInt32(controlKey); hotKeys.pressed()
+        XCTAssertTrue(hotKeys.rebind(to: .standard))
+        XCTAssertFalse(hotKeys.sessionActive)
+        held = 0
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 1)
+    }
+    func testSingleModifierShortcutReusesInitialRegistrationForCycling() {
+        let shortcut = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(optionKey))
+        var registrations = 0, held = UInt32(optionKey), commits = 0
+        let hotKeys = ClipboardHotKeys(advance: {}, finish: { commits += 1 }, shortcut: shortcut, register: { _, _, _ in registrations += 1; return noErr }, modifiers: { held })
+        hotKeys.pressed(); hotKeys.pressed()
+        XCTAssertEqual(registrations, 1)
+        held = 0; RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 1)
+    }
+
+    func testNormalPasteCannotBecomeGlobalCyclingShortcutAndStoredValueFallsBack() throws {
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        var registrations = 0
+        let hotKeys = ClipboardHotKeys(advance: {}, finish: {}, register: { _, _, _ in registrations += 1; return noErr })
+        let settings = ShortcutSettings(hotKeys: hotKeys, defaults: defaults)
+        let paste = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(cmdKey))
+        XCTAssertFalse(paste.isValid)
+        XCTAssertFalse(settings.apply(paste))
+        XCTAssertEqual(registrations, 1)
+        XCTAssertNil(defaults.data(forKey: ClipboardShortcut.preferenceKey))
+        XCTAssertEqual(hotKeys.shortcut, .standard)
+        XCTAssertTrue(settings.message?.contains("обычной вставки") == true)
+        defaults.set(try JSONEncoder().encode(paste), forKey: ClipboardShortcut.preferenceKey)
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
+    }
+    func testRestoreDefaultResetsUnsavedChoicesWhenActiveShortcutAlreadyDefault() throws {
+        let domain = "NotchHubTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let hotKeys = ClipboardHotKeys(advance: {}, finish: {}, register: { _, _, _ in noErr })
+        let settings = ShortcutSettings(hotKeys: hotKeys, defaults: defaults)
+        var draft = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(controlKey | shiftKey))
+        XCTAssertEqual(settings.current, .standard)
+        XCTAssertTrue(settings.restoreDefault(draft: &draft))
+        XCTAssertEqual(draft, .standard)
+        XCTAssertEqual(settings.current, .standard)
+        XCTAssertEqual(ClipboardShortcut.load(from: defaults), .standard)
+    }
+
 }

@@ -10,37 +10,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var screenObserver: NSObjectProtocol?
     var cycle = ClipboardCycle()
     var keyboardController: PanelController?
+    var shortcutSettings: ShortcutSettings!
+    var settingsWindow: NSWindow?
+    var shortcutMenuItem: NSMenuItem?
     func applicationDidFinishLaunching(_ notification: Notification) {
         store = HubStore(); clock = FocusClock()
         configureScreens()
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.configureScreens() }
-        hotKeys = ClipboardHotKeys(advance: { [weak self] in self?.advanceClipboard() }, finish: { [weak self] in self?.finishClipboard() })
+        hotKeys = ClipboardHotKeys(advance: { [weak self] in self?.advanceClipboard() }, finish: { [weak self] in self?.finishClipboard() }, shortcut: ClipboardShortcut.load())
+        controllers.forEach { $0.state.shortcut = hotKeys.shortcut }
+        shortcutSettings = ShortcutSettings(hotKeys: hotKeys) { [weak self] shortcut in
+            guard let self else { return }
+            self.cancelClipboard()
+            self.controllers.forEach { $0.state.shortcut = shortcut }
+            self.shortcutMenuItem?.title = "Буфер: " + shortcut.instruction
+            self.store.message = nil
+        }
         if let error = hotKeys.error { store.message = error }
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "capsule.inset.filled", accessibilityDescription: "NotchHub")
         status.button?.toolTip = "NotchHub — буфер, полка, заметки и фокус"
         let menu = NSMenu()
         item("Открыть NotchHub", action: #selector(show), menu: menu)
-        let shortcut = NSMenuItem(title: "Буфер: ⌘⌥V, затем держи ⌘ и нажимай V", action: nil, keyEquivalent: "")
+        let shortcut = NSMenuItem(title: "Буфер: " + hotKeys.shortcut.instruction, action: nil, keyEquivalent: "")
+        shortcutMenuItem = shortcut
         menu.addItem(shortcut)
+        item("Настройки…", action: #selector(showSettings), menu: menu)
         item("Пауза / продолжить запись буфера", action: #selector(pause), menu: menu)
         item("Открыть папку хранения", action: #selector(storage), menu: menu)
         menu.addItem(.separator())
         item("Выйти из NotchHub", action: #selector(quit), menu: menu, key: "q")
         status.menu = menu
+        configureMainMenu()
         if CommandLine.arguments.contains("--show") { show(); currentController?.state.pinned = true }
     }
     var currentController: PanelController? { controllers.first(where: { $0.contains(NSEvent.mouseLocation) }) ?? controllers.first }
     func configureScreens() {
         if keyboardController != nil { cancelClipboard() }
         controllers.forEach { $0.dispose() }
-        controllers = NSScreen.screens.map { PanelController(store: store, clock: clock, state: HubState(), screen: $0) }
+        controllers = NSScreen.screens.map {
+            let state = HubState(); state.shortcut = hotKeys?.shortcut ?? ClipboardShortcut.load()
+            return PanelController(store: store, clock: clock, state: state, screen: $0)
+        }
     }
     func advanceClipboard() {
         if keyboardController == nil {
             store.capture()
             guard store.pendingClipboardImports == 0 else {
-                store.message = "Сохраняю новый буфер — повтори ⌘⌥V через мгновение"
+                store.message = "Сохраняю новый буфер — повтори \(hotKeys?.shortcut.label ?? ClipboardShortcut.standard.label) через мгновение"
                 return
             }
             guard let controller = currentController else { return }
@@ -52,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.expand()
         } else { cycle.advance() }
         keyboardController?.state.selectedClipboardID = cycle.selectedID
-        store.message = cycle.selectedID == nil ? "Буфер пуст" : "Отпусти ⌘ — выбрать · затем ⌘V — вставить"
+        store.message = cycle.selectedID == nil ? "Буфер пуст" : (hotKeys.error ?? "Отпусти \(hotKeys.shortcut.primaryLabel) — выбрать · затем ⌘V — вставить")
     }
     func finishClipboard() {
         let id = cycle.finish()
@@ -73,6 +90,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func item(_ title: String, action: Selector, menu: NSMenu, key: String = "") { let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; menu.addItem(item) }
     @objc func show() { currentController?.expand(); currentController?.panel.makeKeyAndOrderFront(nil) }
+    func configureMainMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem(title: "NotchHub", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: "NotchHub")
+        item("Настройки…", action: #selector(showSettings), menu: appMenu, key: ",")
+        appMenu.addItem(.separator())
+        item("Выйти из NotchHub", action: #selector(quit), menu: appMenu, key: "q")
+        appItem.submenu = appMenu; main.addItem(appItem); NSApp.mainMenu = main
+    }
+    @objc func showSettings() {
+        cancelClipboard()
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 330), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "NotchHub — настройки"; window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings))
+            window.center(); settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
     @objc func pause() { store.paused.toggle() }
     @objc func storage() { NSWorkspace.shared.open(store.root) }
     @objc func quit() { NSApp.terminate(nil) }
