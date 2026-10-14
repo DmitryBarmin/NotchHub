@@ -101,6 +101,16 @@ final class ScreenshotEditor: NSObject, ObservableObject {
         panel.setTarget(self); panel.setAction(#selector(colorChanged(_:)))
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         ownsColorPanel = true
+        let anchor = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(anchor) } ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            let size = panel.frame.size
+            let right = anchor.x + 14
+            let x = right + size.width <= visible.maxX ? right : anchor.x - size.width - 14
+            let y = anchor.y + 14 - size.height
+            panel.setFrameOrigin(CGPoint(x: min(max(visible.minX, x), max(visible.minX, visible.maxX - size.width)),
+                                         y: min(max(visible.minY, y), max(visible.minY, visible.maxY - size.height))))
+        }
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
     }
     @objc func colorChanged(_ panel: NSColorPanel) {
@@ -400,10 +410,17 @@ final class ScreenshotController {
     private(set) var active=false
     private var windows: [NSWindow]=[]
     private var editors: [ScreenshotEditor]=[]
+    private var escapeMonitor: Any?
+    private var generation = UUID()
     private let finished: () -> Void
     init(finished: @escaping () -> Void) { self.finished=finished }
     func start() {
         guard !active else { return }; active=true
+        let generation = UUID(); self.generation = generation
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, self?.active == true else { return event }
+            self?.finish(); return nil
+        }
         Task { @MainActor [self] in
             do {
                 let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
@@ -415,6 +432,7 @@ final class ScreenshotController {
                     captures.append((screen,try await SCScreenshotManager.captureImage(contentFilter:filter,configuration:config)))
                 }
                 guard !captures.isEmpty else { throw NSError(domain:"NotchHub",code:1,userInfo:[NSLocalizedDescriptionKey:"Нет доступных экранов"]) }
+                guard active, self.generation == generation else { return }
                 // Snapshot every display before showing any overlay, avoiding self-capture.
                 for (screen,image) in captures {
                     let editor=ScreenshotEditor(image:image,size:screen.frame.size)
@@ -428,6 +446,7 @@ final class ScreenshotController {
                 let target=windows.first(where:{$0.frame.contains(NSEvent.mouseLocation)}) ?? windows.first
                 target?.makeKeyAndOrderFront(nil);target?.makeFirstResponder(target?.contentView)
             } catch {
+                guard active, self.generation == generation else { return }
                 finish()
                 let alert=NSAlert();alert.messageText="Не удалось сделать скриншот"
                 alert.informativeText=CGPreflightScreenCaptureAccess() ? error.localizedDescription : "Разреши NotchHub в Системные настройки → Конфиденциальность и безопасность → Запись экрана, затем перезапусти приложение.\n\n" + error.localizedDescription
@@ -436,6 +455,9 @@ final class ScreenshotController {
         }
     }
     func finish() {
+        generation = UUID()
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        escapeMonitor = nil
         editors.forEach { $0.close=nil; $0.closeColorPanel(); $0.textWindow?.close() };windows.forEach { $0.orderOut(nil);$0.close() }
         editors.removeAll();windows.removeAll();active=false;finished()
     }
