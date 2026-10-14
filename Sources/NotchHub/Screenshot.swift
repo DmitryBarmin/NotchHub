@@ -366,12 +366,6 @@ final class ScreenshotController {
     init(finished: @escaping () -> Void) { self.finished=finished }
     func start() {
         guard !active else { return }; active=true
-        guard CGPreflightScreenCaptureAccess() else {
-            CGRequestScreenCaptureAccess()
-            let alert=NSAlert(); alert.messageText="Разреши запись экрана для скриншотера"
-            alert.informativeText="Системные настройки → Конфиденциальность и безопасность → Запись экрана → NotchHub. После разрешения перезапусти приложение. Скриншоты и распознавание остаются на Mac."
-            alert.addButton(withTitle:"Понятно"); alert.runModal(); finish(); return
-        }
         Task { @MainActor [self] in
             do {
                 let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
@@ -396,7 +390,10 @@ final class ScreenshotController {
                 let target=windows.first(where:{$0.frame.contains(NSEvent.mouseLocation)}) ?? windows.first
                 target?.makeKeyAndOrderFront(nil);target?.makeFirstResponder(target?.contentView)
             } catch {
-                finish(); let alert=NSAlert();alert.messageText="Не удалось сделать скриншот";alert.informativeText=error.localizedDescription;alert.runModal()
+                finish()
+                let alert=NSAlert();alert.messageText="Не удалось сделать скриншот"
+                alert.informativeText=CGPreflightScreenCaptureAccess() ? error.localizedDescription : "Разреши NotchHub в Системные настройки → Конфиденциальность и безопасность → Запись экрана, затем перезапусти приложение.\n\n" + error.localizedDescription
+                alert.addButton(withTitle:"Понятно");alert.runModal()
             }
         }
     }
