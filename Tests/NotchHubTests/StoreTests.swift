@@ -1,0 +1,194 @@
+import XCTest
+import AppKit
+import Carbon
+@testable import NotchHub
+
+final class StoreTests: XCTestCase {
+    func testFloatingIslandGapRemainsInsideHoverArea() {
+        let screen = CGRect(x: 1470, y: 0, width: 1920, height: 1080)
+        let panel = CGRect(x: screen.midX - 52, y: 1058, width: 104, height: 16)
+        XCTAssertTrue(HubState.insideHub(CGPoint(x: screen.midX, y: 1077), panel: panel, screen: screen, notchWidth: 102))
+        XCTAssertTrue(HubState.insideHub(CGPoint(x: screen.midX, y: 1080), panel: panel, screen: screen, notchWidth: 102))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: screen.midX + 60, y: 1077), panel: panel, screen: screen, notchWidth: 102))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: screen.midX, y: 1081), panel: panel, screen: screen, notchWidth: 102))
+    }
+    func testNativeHotKeyDispatchAdvancesAndCommitsOnlyAfterCommandRelease() throws {
+        _ = NSApplication.shared
+        var presses = 0, commits = 0
+        var modifiers = UInt32(cmdKey)
+        let hotKeys = ClipboardHotKeys(advance: { presses += 1 }, finish: { commits += 1 }, modifiers: { modifiers })
+        XCTAssertNil(hotKeys.error)
+        var event: EventRef?
+        XCTAssertEqual(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), 0, 0, &event), noErr)
+        let hotKeyEvent = try XCTUnwrap(event)
+        defer { ReleaseEvent(hotKeyEvent); hotKeys.cancelSession() }
+        var id = EventHotKeyID(signature: 0x4E484342, id: 1)
+        XCTAssertEqual(SetEventParameter(hotKeyEvent, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &id), noErr)
+        XCTAssertEqual(SendEventToEventTarget(hotKeyEvent, GetApplicationEventTarget()), noErr)
+        XCTAssertEqual(presses, 1)
+        XCTAssertNil(hotKeys.error)
+        id.id = 2
+        XCTAssertEqual(SetEventParameter(hotKeyEvent, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &id), noErr)
+        XCTAssertEqual(SendEventToEventTarget(hotKeyEvent, GetApplicationEventTarget()), noErr)
+        XCTAssertEqual(presses, 2)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 0)
+        modifiers = 0
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 1)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+        XCTAssertEqual(commits, 1)
+    }
+    func testEachDisplayUsesItsOwnTopCenterTrigger() {
+        let builtIn = CGRect(x: 0, y: 0, width: 1470, height: 956)
+        let external = CGRect(x: 1470, y: -124, width: 1920, height: 1080)
+        let externalEdge = CGPoint(x: external.midX, y: external.maxY)
+        XCTAssertTrue(HubState.atTrigger(externalEdge, screen: external, notchWidth: 158))
+        XCTAssertFalse(HubState.atTrigger(externalEdge, screen: builtIn, notchWidth: 179))
+        XCTAssertFalse(HubState.atTrigger(CGPoint(x: external.midX, y: external.maxY - 24), screen: external, notchWidth: 158))
+        let above = CGRect(x: -300, y: 956, width: 1920, height: 1080)
+        XCTAssertTrue(HubState.atTrigger(CGPoint(x: above.midX, y: above.maxY), screen: above, notchWidth: 158))
+        XCTAssertFalse(HubState.atTrigger(CGPoint(x: above.midX, y: builtIn.maxY), screen: above, notchWidth: 158))
+    }
+    func testClipboardCycleWrapsAndResets() {
+        let ids = [UUID(), UUID(), UUID()]
+        var cycle = ClipboardCycle()
+        cycle.begin(ids: ids)
+        XCTAssertEqual(cycle.selectedID, ids[0])
+        cycle.advance(); XCTAssertEqual(cycle.selectedID, ids[1])
+        cycle.advance(); XCTAssertEqual(cycle.selectedID, ids[2])
+        cycle.advance(); XCTAssertEqual(cycle.selectedID, ids[0])
+        XCTAssertEqual(cycle.finish(), ids[0])
+        XCTAssertNil(cycle.selectedID)
+        cycle.begin(ids: []); cycle.advance()
+        XCTAssertNil(cycle.finish())
+        cycle.begin(ids: [ids[2]]); cycle.advance()
+        XCTAssertEqual(cycle.finish(), ids[2])
+    }
+    func testKeyboardChoiceCopiesOnCommitWithoutReorderingHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        store.addText("older"); store.addText("latest")
+        pb.setString("original clipboard", forType: .string)
+        let history = store.archive.clips
+        var cycle = ClipboardCycle()
+        cycle.begin(ids: history.map(\.id)); cycle.advance()
+        XCTAssertEqual(pb.string(forType: .string), "original clipboard")
+        let id = try XCTUnwrap(cycle.finish())
+        store.copy(try XCTUnwrap(store.archive.clips.first(where: { $0.id == id })))
+        store.capture()
+        XCTAssertEqual(pb.string(forType: .string), "older")
+        XCTAssertEqual(store.archive.clips, history)
+    }
+    func testTopEdgeDoesNotAlternateOpenAndClose() {
+        let screen = CGRect(x: 0, y: 0, width: 1470, height: 956)
+        let panel = CGRect(x: 562.5, y: 790, width: 345, height: 166)
+        let edge = CGPoint(x: 735, y: 956)
+        XCTAssertTrue(HubState.atTrigger(edge, screen: screen, notchWidth: 179))
+        XCTAssertTrue(HubState.insideHub(edge, panel: panel, screen: screen, notchWidth: 179))
+        XCTAssertFalse(HubState.insideHub(CGPoint(x: 735, y: 789), panel: panel, screen: screen, notchWidth: 179))
+    }
+    func testClearClipboardPreservesShelfAndNote() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        store.addText("history"); store.addText("keep", shelf: true); store.setNote("note")
+        pb.setString("system clipboard", forType: .string)
+        store.clearClipboard(); store.capture()
+        XCTAssertTrue(store.archive.clips.isEmpty)
+        XCTAssertNil(pb.string(forType: .string))
+        XCTAssertEqual(store.archive.shelf.first?.text, "keep")
+        XCTAssertEqual(store.archive.note, "note")
+        XCTAssertTrue(HubStore(root: root, monitor: false, pasteboard: pb).archive.clips.isEmpty)
+    }
+    func testTriggerRequiresTopEdgeAboveNotch() {
+        let screen = CGRect(x: 0, y: 0, width: 1470, height: 956)
+        XCTAssertTrue(HubState.atTrigger(CGPoint(x: 735, y: 955.5), screen: screen, notchWidth: 179))
+        for point in [CGPoint(x: 735, y: 924), CGPoint(x: 735, y: 950), CGPoint(x: 640, y: 955.5), CGPoint(x: 900, y: 955.5)] {
+            XCTAssertFalse(HubState.atTrigger(point, screen: screen, notchWidth: 179))
+        }
+    }
+    func withStore(_ body: (HubStore, URL) throws -> Void) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try body(HubStore(root: root, monitor: false), root)
+    }
+    func testLimitAndDedupAndPersistence() throws {
+        try withStore { store, root in
+            for i in 0..<25 { store.addText("item \(i)") }
+            XCTAssertEqual(store.archive.clips.count, 20)
+            XCTAssertEqual(store.archive.clips.last?.text, "item 5")
+            store.addText("item 10")
+            XCTAssertEqual(store.archive.clips.count, 20)
+            XCTAssertEqual(store.archive.clips.first?.text, "item 10")
+            store.setNote("сохрани мысль")
+            let restored = HubStore(root: root, monitor: false)
+            XCTAssertEqual(restored.archive.clips, store.archive.clips)
+            XCTAssertEqual(restored.archive.note, "сохрани мысль")
+        }
+    }
+    func testOwnedCopyEvictionAndSharedAsset() throws {
+        try withStore { store, root in
+            let original = root.appendingPathComponent("original.txt")
+            try Data("fixture".utf8).write(to: original)
+            store.addFile(original, shelf: false)
+            let clip = try XCTUnwrap(store.archive.clips.first)
+            let copy = try XCTUnwrap(store.assetURL(clip))
+            XCTAssertNotEqual(copy, original)
+            var shelfClip = clip; shelfClip.id = UUID(); store.insert(shelfClip, shelf: true)
+            for i in 0..<20 { store.addText("text \(i)") }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: copy.path))
+            store.clear(shelf: true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: copy.path))
+            XCTAssertEqual(try String(contentsOf: original), "fixture")
+        }
+    }
+    func testImageRoundTrip() throws {
+        try withStore { store, root in
+            let image = NSImage(size: NSSize(width: 24, height: 24))
+            image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 24, height: 24).fill(); image.unlockFocus()
+            store.addImage(try XCTUnwrap(image.tiffRepresentation))
+            let clip = try XCTUnwrap(store.archive.clips.first)
+            XCTAssertEqual(clip.kind, .image)
+            XCTAssertNotNil(NSImage(contentsOf: try XCTUnwrap(store.assetURL(clip))))
+            let dropped = root.appendingPathComponent("drop.png")
+            try Data(contentsOf: try XCTUnwrap(store.assetURL(clip))).write(to: dropped)
+            store.addFile(dropped)
+            XCTAssertEqual(store.archive.shelf.first?.kind, .image)
+        }
+    }
+    func testClockPauseResumeDeadline() {
+        let clock = FocusClock(); let now = Date(timeIntervalSince1970: 10_000)
+        clock.reset(minutes: 5); clock.start(now: now)
+        clock.tick(now: now.addingTimeInterval(70))
+        XCTAssertEqual(clock.remaining, 230, accuracy: 0.01)
+        clock.pause(now: now.addingTimeInterval(75))
+        XCTAssertEqual(clock.remaining, 225, accuracy: 0.01)
+        clock.start(now: now.addingTimeInterval(90))
+        clock.tick(now: now.addingTimeInterval(315))
+        XCTAssertEqual(clock.remaining, 0); XCTAssertFalse(clock.running); XCTAssertTrue(clock.completed)
+    }
+    func testClipboardCapturePauseConcealedAndCopy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
+        pb.setString("before launch", forType: .string)
+        let store = HubStore(root: root, monitor: false, pasteboard: pb)
+        store.capture(); XCTAssertTrue(store.archive.clips.isEmpty)
+        pb.clearContents(); pb.setString("hello", forType: .string)
+        store.capture(); XCTAssertEqual(store.archive.clips.first?.text, "hello")
+        store.paused = true
+        pb.clearContents(); pb.setString("paused", forType: .string)
+        store.capture(); store.paused = false; store.capture()
+        XCTAssertEqual(store.archive.clips.count, 1)
+        pb.clearContents(); pb.setString("secret", forType: .string)
+        pb.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        store.capture(); XCTAssertEqual(store.archive.clips.count, 1)
+        store.copy(try XCTUnwrap(store.archive.clips.first))
+        XCTAssertEqual(pb.string(forType: .string), "hello")
+        store.capture(); XCTAssertEqual(store.archive.clips.count, 1)
+    }
+}
