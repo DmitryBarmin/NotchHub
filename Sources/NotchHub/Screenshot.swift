@@ -428,14 +428,62 @@ struct ScreenshotActions: View {
     }
 }
 final class ScreenshotWindow: NSWindow { override var canBecomeKey: Bool { true } }
+/// Check cancellation at every native await boundary: an in-flight capture may
+/// finish, but a cancelled session must never request another display.
+@MainActor enum ScreenshotCaptureSequence {
+    static func run<Display, Image>(loadDisplays: () async throws -> [Display], capture: (Display) async throws -> Image, isCurrent: () -> Bool) async throws -> [(Display, Image)] {
+        func checkCurrent() throws {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw CancellationError() }
+        }
+        try checkCurrent()
+        let displays = try await loadDisplays()
+        try checkCurrent()
+        var captures: [(Display, Image)] = []
+        for display in displays {
+            try checkCurrent()
+            let image = try await capture(display)
+            try checkCurrent()
+            captures.append((display, image))
+        }
+        return captures
+    }
+}
+
 final class ScreenshotController {
     private(set) var active=false
     private var windows: [NSWindow]=[]
     private var editors: [ScreenshotEditor]=[]
     private var escapeMonitor: Any?
     private var generation = UUID()
+    typealias CapturedScreen = (NSScreen, CGImage)
+    typealias CaptureOperation = @MainActor (@escaping () -> Bool) async throws -> [CapturedScreen]
+    private var captureTask: Task<Void, Never>?
+    var hasCaptureTask: Bool { captureTask != nil }
+    private let capture: CaptureOperation
+    private let present: (([CapturedScreen]) -> Void)?
     private let finished: () -> Void
-    init(finished: @escaping () -> Void) { self.finished=finished }
+    init(capture: CaptureOperation? = nil, present: (([CapturedScreen]) -> Void)? = nil, finished: @escaping () -> Void) {
+        self.capture = capture ?? Self.captureScreens; self.present = present; self.finished=finished
+    }
+    @MainActor private static func captureScreens(isCurrent: @escaping () -> Bool) async throws -> [CapturedScreen] {
+        let captures = try await ScreenshotCaptureSequence.run(loadDisplays: {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            return NSScreen.screens.compactMap { screen -> (NSScreen, SCDisplay)? in
+                guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32,
+                      let display = content.displays.first(where: { $0.displayID == id }) else { return nil }
+                return (screen, display)
+            }
+        }, capture: { screen, display in
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = Int(screen.frame.width * screen.backingScaleFactor)
+            config.height = Int(screen.frame.height * screen.backingScaleFactor); config.showsCursor = false
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        }, isCurrent: isCurrent)
+        guard !captures.isEmpty else { throw NSError(domain: "NotchHub", code: 1, userInfo: [NSLocalizedDescriptionKey: "Нет доступных экранов"]) }
+        return captures.map { ($0.0.0, $0.1) }
+    }
     func start() {
         guard !active else { return }; active=true
         let generation = UUID(); self.generation = generation
@@ -443,18 +491,12 @@ final class ScreenshotController {
             guard event.keyCode == 53, self?.active == true else { return event }
             self?.finish(); return nil
         }
-        Task { @MainActor [self] in
+        captureTask = Task { @MainActor [self] in
+            defer { if self.generation == generation { self.captureTask = nil } }
             do {
-                let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
-                var captures: [(NSScreen, CGImage)]=[]
-                for screen in NSScreen.screens {
-                    guard let id=screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32, let display=content.displays.first(where:{$0.displayID==id}) else { continue }
-                    let filter=SCContentFilter(display:display,excludingWindows:[])
-                    let config=SCStreamConfiguration(); config.width=Int(screen.frame.width*screen.backingScaleFactor);config.height=Int(screen.frame.height*screen.backingScaleFactor);config.showsCursor=false
-                    captures.append((screen,try await SCScreenshotManager.captureImage(contentFilter:filter,configuration:config)))
-                }
-                guard !captures.isEmpty else { throw NSError(domain:"NotchHub",code:1,userInfo:[NSLocalizedDescriptionKey:"Нет доступных экранов"]) }
-                guard active, self.generation == generation else { return }
+                let captures = try await capture { [weak self] in self?.active == true && self?.generation == generation }
+                guard active, self.generation == generation, !Task.isCancelled else { return }
+                if let present { present(captures); return }
                 // Snapshot every display before showing any overlay, avoiding self-capture.
                 for (screen,image) in captures {
                     let editor=ScreenshotEditor(image:image,size:screen.frame.size)
@@ -468,7 +510,7 @@ final class ScreenshotController {
                 let target=windows.first(where:{$0.frame.contains(NSEvent.mouseLocation)}) ?? windows.first
                 target?.makeKeyAndOrderFront(nil);target?.makeFirstResponder(target?.contentView)
             } catch {
-                guard active, self.generation == generation else { return }
+                guard active, self.generation == generation, !Task.isCancelled else { return }
                 finish()
                 let alert=NSAlert();alert.messageText="Не удалось сделать скриншот"
                 alert.informativeText=CGPreflightScreenCaptureAccess() ? error.localizedDescription : "Разреши NotchHub в Системные настройки → Конфиденциальность и безопасность → Запись экрана, затем перезапусти приложение.\n\n" + error.localizedDescription
@@ -478,6 +520,7 @@ final class ScreenshotController {
     }
     func finish() {
         generation = UUID()
+        captureTask?.cancel(); captureTask = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
         editors.forEach { $0.close=nil; $0.closeColorPanel(); $0.textWindow?.close() };windows.forEach { $0.orderOut(nil);$0.close() }

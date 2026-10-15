@@ -58,4 +58,72 @@ final class ScreenshotTests: XCTestCase {
         let text=try ScreenshotEditor.recognize(XCTUnwrap(bitmap.cgImage))
         XCTAssertTrue(text.contains("123"),text)
     }
+    @MainActor func testCancelBeforeDisplayListReturnsDoesNotCaptureAndOldTaskCannotClearRestart() async {
+        _ = NSApplication.shared
+        let firstEntered = expectation(description: "old content requested")
+        let nextEntered = expectation(description: "new content requested")
+        let oldStopped = expectation(description: "old task unwound")
+        let presented = expectation(description: "new session presented")
+        var oldGate: CheckedContinuation<Void, Never>?, nextGate: CheckedContinuation<Void, Never>?
+        var sessions = 0, captured: [Int] = [], presentations = 0
+        let controller = ScreenshotController(capture: { isCurrent in
+            sessions += 1
+            let session = sessions
+            do {
+                _ = try await ScreenshotCaptureSequence.run(loadDisplays: {
+                    if session == 1 {
+                        firstEntered.fulfill()
+                        await withCheckedContinuation { oldGate = $0 }
+                    } else {
+                        nextEntered.fulfill()
+                        await withCheckedContinuation { nextGate = $0 }
+                    }
+                    return [session * 10, session * 10 + 1]
+                }, capture: { display in captured.append(display); return display }, isCurrent: isCurrent)
+                return []
+            } catch {
+                if session == 1 { oldStopped.fulfill() }
+                throw error
+            }
+        }, present: { _ in presentations += 1; presented.fulfill() }, finished: {})
+        controller.start(); await fulfillment(of: [firstEntered], timeout: 1)
+        controller.finish(); XCTAssertFalse(controller.hasCaptureTask)
+        controller.start(); await fulfillment(of: [nextEntered], timeout: 1)
+        oldGate?.resume(); await fulfillment(of: [oldStopped], timeout: 1)
+        XCTAssertTrue(controller.active); XCTAssertTrue(controller.hasCaptureTask)
+        XCTAssertTrue(captured.isEmpty); XCTAssertEqual(presentations, 0)
+        nextGate?.resume(); await fulfillment(of: [presented], timeout: 1)
+        XCTAssertEqual(captured, [20, 21]); XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(controller.active); XCTAssertFalse(controller.hasCaptureTask)
+        controller.finish()
+    }
+    @MainActor func testCancelDuringFirstCaptureSkipsRemainingDisplaysAndReleasesFrame() async {
+        _ = NSApplication.shared
+        final class Frame {}
+        let entered = expectation(description: "first display in native capture")
+        let stopped = expectation(description: "cancelled task unwound")
+        var gate: CheckedContinuation<Void, Never>?
+        var requested: [Int] = [], presentations = 0
+        weak var capturedFrame: Frame?
+        let controller = ScreenshotController(capture: { isCurrent in
+            do {
+                _ = try await ScreenshotCaptureSequence.run(loadDisplays: { [1, 2, 3] }, capture: { display in
+                    requested.append(display)
+                    let frame = Frame(); capturedFrame = frame
+                    entered.fulfill()
+                    await withCheckedContinuation { gate = $0 }
+                    return frame
+                }, isCurrent: isCurrent)
+                return []
+            } catch { stopped.fulfill(); throw error }
+        }, present: { _ in presentations += 1 }, finished: {})
+        controller.start(); await fulfillment(of: [entered], timeout: 1)
+        controller.finish()
+        XCTAssertFalse(controller.active); XCTAssertFalse(controller.hasCaptureTask)
+        XCTAssertNotNil(capturedFrame) // The already-running native call may finish.
+        gate?.resume(); await fulfillment(of: [stopped], timeout: 1)
+        XCTAssertEqual(requested, [1]); XCTAssertEqual(presentations, 0)
+        XCTAssertNil(capturedFrame)
+    }
+
 }
