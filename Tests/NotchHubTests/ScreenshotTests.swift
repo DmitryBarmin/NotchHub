@@ -38,6 +38,72 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(settings.current,ScreenshotSettings.standard);XCTAssertEqual(defaults.data(forKey:ScreenshotSettings.preferenceKey),old)
         XCTAssertNotNil(settings.message)
     }
+    private func sendHotKey(_ kind: UInt32, signature: OSType, id: UInt32 = 1, expectedStatus: OSStatus = noErr) throws {
+        var event: EventRef?
+        XCTAssertEqual(CreateEvent(nil, OSType(kEventClassKeyboard), kind, 0, EventAttributes(kEventAttributeNone), &event), noErr)
+        let nativeEvent = try XCTUnwrap(event)
+        defer { ReleaseEvent(nativeEvent) }
+        var hotKeyID = EventHotKeyID(signature: signature, id: id)
+        XCTAssertEqual(SetEventParameter(nativeEvent, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &hotKeyID), noErr)
+        XCTAssertEqual(SendEventToEventTarget(nativeEvent, GetApplicationEventTarget()), expectedStatus)
+    }
+    func testPreviewWaitsForNativeReleaseAndIgnoresRepeatedPresses() throws {
+        _ = NSApplication.shared
+        let name = UUID().uuidString, signature: OSType = 0x54505256
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        var shown = 0, hidden = 0
+        let settings = ScreenshotSettings(defaults: defaults, signature: signature, register: { _, _ in noErr }, released: { hidden += 1 }, action: { shown += 1 })
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(shown, 1)
+        XCTAssertEqual(hidden, 0, "A held preview must not close when key-state polling cannot see the key")
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature + 1, expectedStatus: OSStatus(eventNotHandledErr))
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature, id: 2, expectedStatus: OSStatus(eventNotHandledErr))
+        XCTAssertEqual(hidden, 0, "Another shortcut must not close the held preview")
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature)
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature)
+        XCTAssertEqual(hidden, 1)
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        XCTAssertEqual(shown, 2)
+        withExtendedLifetime(settings) {}
+    }
+    func testShortcutRebindOnlyEndsHeldPreviewAfterSuccessfulRegistration() throws {
+        _ = NSApplication.shared
+        let name = UUID().uuidString, signature: OSType = 0x54524244
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        var registrationSucceeds = true, hidden = 0, shown = 0
+        let settings = ScreenshotSettings(defaults: defaults, signature: signature, register: { _, _ in registrationSucceeds ? noErr : OSStatus(eventHotKeyExistsErr) }, released: { hidden += 1 }, action: { shown += 1 })
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        let replacement = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_8), modifiers: UInt32(cmdKey | shiftKey))
+        registrationSucceeds = false
+        XCTAssertFalse(settings.apply(replacement))
+        XCTAssertEqual(hidden, 0)
+        registrationSucceeds = true
+        XCTAssertTrue(settings.apply(replacement))
+        XCTAssertEqual(hidden, 1)
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature)
+        XCTAssertEqual(hidden, 1)
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        XCTAssertEqual(shown, 2)
+    }
+    func testScreenshotIsSingleShotUntilNativeRelease() throws {
+        _ = NSApplication.shared
+        let name = UUID().uuidString, signature: OSType = 0x54535348
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        var captures = 0
+        let settings = ScreenshotSettings(defaults: defaults, signature: signature, register: { _, _ in noErr }, action: { captures += 1 })
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        XCTAssertEqual(captures, 1)
+        try sendHotKey(UInt32(kEventHotKeyReleased), signature: signature)
+        try sendHotKey(UInt32(kEventHotKeyPressed), signature: signature)
+        XCTAssertEqual(captures, 2)
+        withExtendedLifetime(settings) {}
+    }
     func testEditorShortcutsRejectDuplicatesAndDispatchCustomModifiers() throws {
         let name=UUID().uuidString;let defaults=try XCTUnwrap(UserDefaults(suiteName:name));defer { defaults.removePersistentDomain(forName:name) }
         let settings=EditorShortcutSettings(defaults:defaults)

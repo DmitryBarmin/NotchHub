@@ -91,10 +91,11 @@ final class HubStore: ObservableObject {
         }
         save(); cleanAssets()
     }
-    func addText(_ text: String, shelf: Bool = false) {
-        guard !text.isEmpty else { return }
-        guard text.utf8.count <= Self.maxBytes else { message = "Текст слишком большой (лимит 30 МБ)"; return }
+    @discardableResult func addText(_ text: String, shelf: Bool = false) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard text.utf8.count <= Self.maxBytes else { message = "Текст слишком большой (лимит 30 МБ)"; return false }
         insert(Clip(kind: .text, title: String(text.prefix(100)), text: text, fingerprint: digest(Data(text.utf8))), shelf: shelf)
+        return true
     }
     func addImage(_ data: Data, shelf: Bool = false) {
         guard let prepared = Self.prepareImage(data) else { message = "Картинка недоступна или больше 30 МБ"; return }
@@ -224,6 +225,11 @@ final class HubStore: ObservableObject {
         guard !types.contains(where: { blocked.contains($0.rawValue) }) else { return }
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             for url in urls.prefix(20) { enqueueFile(url, shelf: false) }; return
+        }
+        for item in pb.pasteboardItems ?? [] {
+            if let type = item.types.first(where: { UTType($0.rawValue)?.conforms(to: .image) == true }), let data = item.data(forType: type) {
+                enqueueImage(data); return
+            }
         }
         if let data = pb.data(forType: .png) ?? pb.data(forType: .tiff) { enqueueImage(data); return }
         if let text = pb.string(forType: .string) { addText(text) }

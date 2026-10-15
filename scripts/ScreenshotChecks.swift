@@ -5,6 +5,14 @@ import Carbon
  static func main() throws {
   _ = NSApplication.shared
   func check(_ passed: Bool, _ name: String) { precondition(passed,name);print("PASS",name) }
+  func hotKey(_ kind: UInt32, signature: OSType = 0x54455354) {
+   var event: EventRef?
+   check(CreateEvent(nil,OSType(kEventClassKeyboard),kind,0,EventAttributes(kEventAttributeNone),&event)==noErr,"create native hotkey event")
+   let nativeEvent=event!;defer { ReleaseEvent(nativeEvent) }
+   var id=EventHotKeyID(signature:signature,id:1)
+   check(SetEventParameter(nativeEvent,EventParamName(kEventParamDirectObject),EventParamType(typeEventHotKeyID),MemoryLayout<EventHotKeyID>.size,&id)==noErr,"set native hotkey identity")
+   check(SendEventToEventTarget(nativeEvent,GetApplicationEventTarget())==noErr,"dispatch native hotkey event")
+  }
   check(ScreenshotGeometry.rect(CGPoint(x:80,y:60),CGPoint(x:-20,y:10),bounds:CGRect(x:0,y:0,width:100,height:100)) == CGRect(x:0,y:10,width:80,height:50),"reverse drag clamped")
   check(ScreenshotGeometry.pixelRect(CGRect(x:10.25,y:20.25,width:50.5,height:30.5),points:CGSize(width:100,height:100),pixels:CGSize(width:200,height:200)) == CGRect(x:20,y:40,width:102,height:62),"Retina outward crop")
   let context=CGContext(data:nil,width:200,height:100,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -44,9 +52,25 @@ import Carbon
   check(local.action(for:event) == .copy,"custom editor command dispatch")
   var shown=0,hidden=0
   let preview=ScreenshotSettings(defaults:defaults,preferenceKey:"testPreview",standard:ClipboardShortcut(keyCode:UInt32(kVK_Space),modifiers:UInt32(cmdKey|optionKey)),signature:0x54455354,register:{_,_ in noErr},released:{hidden+=1},action:{shown+=1})
-  preview.pressed();check(shown==1,"preview opens on press")
+  hotKey(UInt32(kEventHotKeyPressed));check(shown==1,"preview opens on press")
+  hotKey(UInt32(kEventHotKeyPressed));check(shown==1,"held preview ignores key repeat")
   RunLoop.main.run(until:Date().addingTimeInterval(0.1))
-  check(hidden>=1,"preview closes after release")
+  check(hidden==0,"preview stays open without physical key-state access")
+  hotKey(UInt32(kEventHotKeyReleased));check(hidden==1,"preview closes after native release")
+  hotKey(UInt32(kEventHotKeyReleased));check(hidden==1,"duplicate release ignored")
+  hotKey(UInt32(kEventHotKeyPressed));check(shown==2,"next press opens preview again")
+  check(preview.apply(ClipboardShortcut(keyCode:UInt32(kVK_ANSI_B),modifiers:UInt32(cmdKey|optionKey))),"held preview rebind succeeds")
+  check(hidden==2,"rebind closes held preview")
+  hotKey(UInt32(kEventHotKeyReleased));check(hidden==2,"old release after rebind ignored")
+  var captures=0
+  let single=ScreenshotSettings(defaults:defaults,preferenceKey:"testSingleShot",signature:0x54535348,register:{_,_ in noErr},action:{captures+=1})
+  hotKey(UInt32(kEventHotKeyPressed),signature:0x54535348)
+  hotKey(UInt32(kEventHotKeyPressed),signature:0x54535348)
+  check(captures==1,"screenshot is single shot while held")
+  hotKey(UInt32(kEventHotKeyReleased),signature:0x54535348)
+  hotKey(UInt32(kEventHotKeyPressed),signature:0x54535348)
+  check(captures==2,"screenshot can capture after release")
+  withExtendedLifetime((preview,single)) {}
   let bitmap=NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:800,pixelsHigh:160,bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!
   NSGraphicsContext.saveGraphicsState();NSGraphicsContext.current=NSGraphicsContext(bitmapImageRep:bitmap);NSColor.white.setFill();CGRect(x:0,y:0,width:800,height:160).fill()
   ("NOTCH HUB 123" as NSString).draw(at:CGPoint(x:40,y:55),withAttributes:[.font:NSFont.systemFont(ofSize:52),.foregroundColor:NSColor.black]);NSGraphicsContext.restoreGraphicsState()

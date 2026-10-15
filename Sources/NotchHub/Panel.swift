@@ -511,12 +511,13 @@ struct HubView: View {
             TextEditor(text: Binding(get: { store.archive.note }, set: { store.setNote($0) }))
                 .font(.system(size: 11)).scrollContentBackground(.hidden).padding(2)
                 .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
-            Button {
-                let text = store.archive.note; guard !text.isEmpty else { return }
-                store.addText(text); if let clip = store.archive.clips.first { store.copy(clip) }
-            } label: { Image(systemName: "doc.on.doc").font(.system(size: 11)) }
+            Button { copyNote() } label: { Image(systemName: "doc.on.doc").font(.system(size: 11)) }
             .buttonStyle(.plain).help("Копировать заметку")
         }
+    }
+    func copyNote() {
+        guard store.addText(store.archive.note), let clip = store.archive.clips.first else { return }
+        store.copy(clip)
     }
     private var focusView: some View {
         HStack(spacing: 9) {
@@ -534,7 +535,7 @@ struct HubView: View {
             Button { clock.reset() } label: { Image(systemName: "arrow.counterclockwise").font(.system(size: 12)) }.help("Сбросить")
         }.buttonStyle(.plain).padding(.horizontal, 4)
     }
-    private func receive(_ providers: [NSItemProvider]) -> Bool {
+    func receive(_ providers: [NSItemProvider]) -> Bool {
         guard state.sections.isEnabled(.clipboard) || state.sections.isEnabled(.shelf) else { store.message = "Включи Буфер или Полку в настройках"; return false }
         state.reveal?()
         for provider in providers.prefix(20) {
@@ -547,9 +548,13 @@ struct HubView: View {
                     else { url = nil }
                     DispatchQueue.main.async { if let url { store.enqueueFile(url, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять файл" } }
                 }
+            } else if let imageType = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) {
+                provider.loadDataRepresentation(forTypeIdentifier: imageType) { data, error in
+                    DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
+                }
             } else if provider.canLoadObject(ofClass: NSImage.self) {
                 _ = provider.loadObject(ofClass: NSImage.self) { object, error in
-                    let data = (object as? NSImage)?.tiffRepresentation
+                    let data = (object as? NSImage).flatMap(Self.boundedImageData)
                     DispatchQueue.main.async { if let data { store.enqueueImage(data, shelf: state.sections.isEnabled(.shelf)) } else { store.message = error?.localizedDescription ?? "Не удалось принять картинку" } }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
@@ -564,5 +569,14 @@ struct HubView: View {
             }
         }
         return !providers.isEmpty
+    }
+    static func boundedImageData(_ image: NSImage) -> Data? {
+        let sizes = image.representations.map { rep in
+            if let bitmap = rep as? NSBitmapImageRep { return Double(bitmap.bytesPerRow) * Double(bitmap.pixelsHigh) }
+            return max(Double(rep.pixelsWide), Double(image.size.width)) * max(Double(rep.pixelsHigh), Double(image.size.height)) * 4
+        }
+        let bytes = sizes.isEmpty ? Double(image.size.width) * Double(image.size.height) * 4 : sizes.reduce(0, +)
+        guard bytes > 0, bytes <= Double(HubStore.maxBytes) else { return nil }
+        return image.tiffRepresentation
     }
 }

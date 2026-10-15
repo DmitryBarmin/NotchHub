@@ -12,7 +12,7 @@ final class ScreenshotSettings: ObservableObject {
     private var reference: EventHotKeyRef?
     private let action: () -> Void
     private let released: (() -> Void)?
-    private var releaseTimer: Timer?
+    private var isPressed = false
     private let signature: OSType
     private let preferenceKey: String
     let defaultShortcut: ClipboardShortcut
@@ -29,16 +29,20 @@ final class ScreenshotSettings: ObservableObject {
         }
         if let data = defaults.data(forKey: preferenceKey), let saved = try? JSONDecoder().decode(ClipboardShortcut.self, from: data), saved.isValid { current = saved }
         else { current = standard }
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+        ]
         let status = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
             guard let event, let context else { return OSStatus(eventNotHandledErr) }
             var id = EventHotKeyID()
             guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr, id.id == 1 else { return OSStatus(eventNotHandledErr) }
             let owner = Unmanaged<ScreenshotSettings>.fromOpaque(context).takeUnretainedValue()
             guard id.signature == owner.signature else { return OSStatus(eventNotHandledErr) }
-            owner.pressed()
+            if GetEventKind(event) == UInt32(kEventHotKeyPressed) { owner.pressed() }
+            else { owner.release() }
             return noErr
-        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        }, specs.count, &specs, Unmanaged.passUnretained(self).toOpaque(), &handler)
         if status == noErr { _ = apply(current) }
         else { message = "Не удалось зарегистрировать скриншотер (\(status))" }
     }
@@ -49,23 +53,22 @@ final class ScreenshotSettings: ObservableObject {
         let result = register(candidate, &replacement)
         guard result == noErr else { message = "\(candidate.label) занято или недоступно. Прежняя клавиша сохранена."; return false }
         if let reference { UnregisterEventHotKey(reference) }
-        releaseTimer?.invalidate(); releaseTimer = nil; released?()
+        release()
         reference = replacement; current = candidate; message = nil
         if let data = try? JSONEncoder().encode(candidate) { defaults.set(data, forKey: preferenceKey) }
         return true
     }
     func pressed() {
+        guard !isPressed else { return }
+        isPressed = true
         action()
-        guard released != nil, releaseTimer == nil else { return }
-        releaseTimer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if !CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(self.current.keyCode)) || GetCurrentKeyModifiers() & self.current.modifiers != self.current.modifiers {
-                self.releaseTimer?.invalidate(); self.releaseTimer = nil; self.released?()
-            }
-        }
-        RunLoop.main.add(releaseTimer!, forMode: .common)
     }
-    deinit { releaseTimer?.invalidate(); if let reference { UnregisterEventHotKey(reference) }; if let handler { RemoveEventHandler(handler) } }
+    private func release() {
+        guard isPressed else { return }
+        isPressed = false
+        released?()
+    }
+    deinit { if let reference { UnregisterEventHotKey(reference) }; if let handler { RemoveEventHandler(handler) } }
 }
 
 struct ScreenshotShortcutCard: View {
