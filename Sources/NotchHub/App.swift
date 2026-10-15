@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store = HubStore(); clock = FocusClock()
         screenshotController = ScreenshotController { [weak self] in self?.configureScreens() }
         screenshotSettings = ScreenshotSettings { [weak self] in self?.takeScreenshot() }
-        previewSettings = ScreenshotSettings(preferenceKey: "previewShortcut", standard: ClipboardShortcut(keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | optionKey)), signature: 0x4E485056,
+        previewSettings = ScreenshotSettings(preferenceKey: "previewShortcut", standard: ClipboardShortcut(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | optionKey)), signature: 0x4E485056,
             released: { [weak self] in self?.hideKeyboardPreview() }, action: { [weak self] in self?.showKeyboardPreview() })
         sectionSettings = SectionSettings { [weak self] in self?.applySectionVisibility($0) }
         layoutSettings = LayoutSettings { [weak self] layout in self?.controllers.forEach { $0.applyLayout(layout) } }

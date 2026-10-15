@@ -288,8 +288,14 @@ struct HubView: View {
             // Keep all interactive content below the physical camera cutout.
             Color.clear.frame(height: state.expanded ? state.notchHeight : state.collapsedHeight)
             if state.expanded {
-                content
-                    .transition(.opacity.combined(with: .offset(y: -8)))
+                HStack(spacing: 0) {
+                    if state.sections.showScreenshotButton || !state.sections.isEmpty {
+                        navigationRail
+                    }
+                    content.frame(maxWidth: .infinity)
+                }
+                .frame(height: max(0, state.expandedHeight - state.notchHeight))
+                .transition(.opacity)
             }
             Spacer(minLength: 0)
         }
@@ -322,16 +328,6 @@ struct HubView: View {
                     .help("NotchHub · верхний край — раскрыть · \(state.shortcut.label) — переключать буфер")
             }
         }
-        .overlay(alignment: .topLeading) {
-            if state.expanded {
-                HStack(spacing: 3) {
-                    if state.sections.isEnabled(.clipboard) { tab("Буфер", icon: "doc.on.clipboard", index: 0) }
-                    if state.sections.isEnabled(.shelf) { tab("Полка", icon: "tray", index: 1) }
-                    if state.sections.isEnabled(.note) { tab("Заметка", icon: "square.and.pencil", index: 2) }
-                    if state.sections.isEnabled(.timer) { tab("Фокус", icon: "timer", index: 3) }
-                }.frame(height: state.notchHeight).padding(.leading, 8)
-            }
-        }
         .overlay(alignment: .topTrailing) {
             if state.expanded {
                 toolbar.frame(height: state.notchHeight).padding(.trailing, 8)
@@ -354,13 +350,34 @@ struct HubView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
+    // The rail participates in the body layout, below the camera safe area.
+    // A fixed width keeps list/editor/preview content from rendering beneath it.
+    private var navigationRail: some View {
+        ScrollView(.vertical) {
+            VStack(spacing: 3) {
+                if state.sections.showScreenshotButton {
+                    Button { state.takeScreenshot?() } label: {
+                        Image(systemName: "viewfinder").font(.system(size: 12))
+                            .frame(width: 24, height: 22)
+                            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                    .buttonStyle(.plain).help("Сделать скриншот").accessibilityLabel("Сделать скриншот")
+                    .padding(.bottom, 3)
+                }
+                if state.sections.isEnabled(.clipboard) { tab("Буфер", icon: "doc.on.clipboard", index: 0) }
+                if state.sections.isEnabled(.shelf) { tab("Полка", icon: "tray", index: 1) }
+                if state.sections.isEnabled(.note) { tab("Заметка", icon: "square.and.pencil", index: 2) }
+                if state.sections.isEnabled(.timer) { tab("Фокус", icon: "timer", index: 3) }
+            }
+            .frame(width: 28).padding(.vertical, 4)
+        }
+        .scrollIndicators(.hidden)
+        .frame(width: 28)
+        .padding(.leading, 6)
+    }
     private var toolbar: some View {
         HStack(spacing: 3) {
-                if state.sections.showScreenshotButton {
-                Button { state.takeScreenshot?() } label: {
-                    Image(systemName: "viewfinder").frame(width: 20, height: 20)
-                }.help("Сделать скриншот").accessibilityLabel("Сделать скриншот")
-                }
                 Button { state.pinned.toggle() } label: {
                     Image(systemName: state.pinned ? "pin.fill" : "pin").frame(width: 20, height: 20)
                 }.help("Оставить открытым")
@@ -424,7 +441,7 @@ struct HubView: View {
     private func tab(_ title: String, icon: String, index: Int) -> some View {
         Button { state.showPreview?(nil); state.tab = index; search = ""; searching = false; store.message = nil } label: {
             Image(systemName: icon).font(.system(size: 11))
-                .frame(width: 16, height: 20)
+                .frame(width: 24, height: 22)
                 .background(RoundedRectangle(cornerRadius: 6).fill(state.tab == index ? Color.white.opacity(0.14) : .clear))
                 .foregroundStyle(state.tab == index ? accent : Color.white.opacity(0.55))
         }.buttonStyle(.plain).help(title).accessibilityLabel(title)
