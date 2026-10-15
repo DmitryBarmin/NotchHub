@@ -98,9 +98,11 @@ struct ShortcutSettingsView: View {
     @ObservedObject var layout: LayoutSettings
     @ObservedObject var screenshots: ScreenshotSettings
     @ObservedObject var previews: ScreenshotSettings
+    @ObservedObject var updater: AppUpdater
     @State private var draft: ClipboardShortcut
     @State private var page = 0
-    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings) {
+    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings, updater: AppUpdater) {
+        self.updater = updater
         self.previews = previews
         self.screenshots = screenshots
         self.settings = settings; self.sections = sections; self.layout = layout; _draft = State(initialValue: settings.current)
@@ -123,12 +125,14 @@ struct ShortcutSettingsView: View {
                 Text("Основные").tag(0)
                 Text("Размеры").tag(1)
                 Text("Клавиши").tag(2)
+                Text("Обновления").tag(3)
             }.pickerStyle(.segmented).controlSize(.large).labelsHidden()
             ScrollView {
                 Group {
                     switch page {
                     case 0: sectionsCard
                     case 1: LayoutSettingsView(settings: layout)
+                    case 3: updatesCard
                     default: VStack(spacing: 16) { shortcutCard; ScreenshotShortcutCard(settings: previews, title: "Предпросмотр буфера", detail: "При переключении буфера удерживай эту комбинацию. Отпусти клавишу — предпросмотр скроется."); ScreenshotShortcutCard(settings: screenshots); EditorShortcutCard() }
                     }
                 }.padding(.vertical, 2)
@@ -138,6 +142,28 @@ struct ShortcutSettingsView: View {
             LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .onChange(of: settings.current) { _, value in draft = value }
+    }
+    private var updatesCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsHeading(title: "Обновления NotchHub", icon: "arrow.triangle.2.circlepath")
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+                Text("Установлена версия \(version)").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text(updater.status).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if updater.busy {
+                    if let progress = updater.progress { ProgressView(value: progress).progressViewStyle(.linear) }
+                    else { ProgressView().controlSize(.small) }
+                }
+                HStack {
+                    Text("Новая версия загрузится из GitHub. После установки NotchHub перезапустится.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 16)
+                    Button("Обновить") { updater.update() }
+                        .buttonStyle(.borderedProminent).disabled(updater.busy)
+                }
+            }
+        }
     }
     private var sectionsCard: some View {
         SettingsCard {

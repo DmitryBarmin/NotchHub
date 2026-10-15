@@ -2,7 +2,13 @@ import AppKit
 import SwiftUI
 import Carbon
 
+private let notchHubUpdateConfiguration = AppUpdater.Configuration(
+    repository: "DmitryBarmin/NotchHub", appName: "NotchHub",
+    bundleIdentifier: "local.notchhub.app", relaunchArguments: []
+)
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var updater: AppUpdater!
     var status: NSStatusItem!
     var store: HubStore!
     var clock: FocusClock!
@@ -20,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsWindow: NSWindow?
     var shortcutMenuItem: NSMenuItem?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updater = AppUpdater(configuration: notchHubUpdateConfiguration)
         store = HubStore(); clock = FocusClock()
         screenshotController = ScreenshotController { [weak self] in self?.configureScreens() }
         screenshotSettings = ScreenshotSettings { [weak self] in self?.takeScreenshot() }
@@ -140,7 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "NotchHub — настройки"; window.isReleasedWhenClosed = false
             window.titlebarAppearsTransparent = true
             window.contentMinSize = NSSize(width: min(500, max(1, visible.width - 40)), height: min(460, max(1, visible.height - 60)))
-            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings, screenshots: screenshotSettings, previews: previewSettings))
+            window.contentView = NSHostingView(rootView: ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings, screenshots: screenshotSettings, previews: previewSettings, updater: updater))
             window.center(); settingsWindow = window
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -161,7 +168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main struct NotchHubApp {
-    static func main() {
+    @MainActor static func main() {
+        if AppUpdater.runHelperIfRequested(configuration: notchHubUpdateConfiguration) { return }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
