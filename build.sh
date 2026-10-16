@@ -16,16 +16,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.notchhub.app</string>
 <key>CFBundleName</key><string>NotchHub</string>
 <key>CFBundleDisplayName</key><string>NotchHub</string>
-<key>CFBundleVersion</key><string>13</string>
-<key>CFBundleShortVersionString</key><string>1.3.9</string>
+<key>CFBundleVersion</key><string>16</string>
+<key>CFBundleShortVersionString</key><string>2.0.2</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>local.notchhub.transfer</string><key>CFBundleURLSchemes</key><array><string>notchhub</string></array></dict></array>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 swift scripts/Icon.swift "$PWD/dist"
 iconutil -c icns dist/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$APP"
+codesign --force --sign - --identifier local.notchhub.app --requirements '=designated => identifier "local.notchhub.app"' "$APP"
 echo "$APP"

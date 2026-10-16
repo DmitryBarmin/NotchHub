@@ -55,6 +55,8 @@ struct FilePreview: NSViewRepresentable {
     let url: URL
     func makeNSView(context: Context) -> QLPreviewView {
         let view = QLPreviewView(frame: .zero, style: .normal)!
+        // SwiftUI dismantling owns cleanup; the window must not also close it.
+        view.shouldCloseWithWindow = false
         view.autostarts = false; view.previewItem = url as NSURL
         return view
     }

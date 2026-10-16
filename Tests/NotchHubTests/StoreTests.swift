@@ -271,7 +271,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(store.archive.clips.count, 1)
     }
 
-    func testPendingClipboardImageCannotBeOverwrittenByHotKeyRelease() throws {
+    @MainActor func testPendingClipboardImageCannotBeOverwrittenByHotKeyRelease() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let pb = NSPasteboard.withUniqueName()
         defer { pb.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
@@ -469,7 +469,7 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(state.tab, 2)
         }
     }
-    func testHidingTimerPausesItAndHiddenClipboardShortcutDoesNotTouchData() throws {
+    @MainActor func testHidingTimerPausesItAndHiddenClipboardShortcutDoesNotTouchData() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let domain = "NotchHubTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain)), pb = NSPasteboard.withUniqueName()

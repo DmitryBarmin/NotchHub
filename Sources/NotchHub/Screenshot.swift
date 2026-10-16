@@ -92,6 +92,8 @@ final class ScreenshotEditor: NSObject, ObservableObject {
     var close: (() -> Void)?
     var changed: (() -> Void)?
     var textWindow: NSWindow?
+    var shortcuts = EditorShortcutSettings.shared
+    var archiveID: UUID?
     init(image: CGImage, size: CGSize) { self.image = image; self.size = size; super.init() }
     private var ownsColorPanel = false
     func chooseColor() {
@@ -334,7 +336,7 @@ final class ScreenshotCanvas: NSView {
     }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { editor.close?(); return }
-        if let action=EditorShortcutSettings.shared.action(for:event) {
+        if let action=editor.shortcuts.action(for:event) {
             switch action {
             case .copy: editor.copyScreenshot()
             case .save: editor.save(in:window)
@@ -454,6 +456,9 @@ final class ScreenshotController {
     private(set) var active=false
     private var windows: [NSWindow]=[]
     private var editors: [ScreenshotEditor]=[]
+    var archiveEditor: ((ScreenshotEditor) -> Void)?
+    var editorShortcuts = EditorShortcutSettings.shared
+    private var reopenedObserver: NSObjectProtocol?
     private var escapeMonitor: Any?
     private var generation = UUID()
     typealias CapturedScreen = (NSScreen, CGImage)
@@ -500,6 +505,7 @@ final class ScreenshotController {
                 // Snapshot every display before showing any overlay, avoiding self-capture.
                 for (screen,image) in captures {
                     let editor=ScreenshotEditor(image:image,size:screen.frame.size)
+                    editor.shortcuts = editorShortcuts
                     editor.close = { [weak self] in self?.finish() }; editors.append(editor)
                     let window=ScreenshotWindow(contentRect:screen.frame,styleMask:.borderless,backing:.buffered,defer:false)
                     window.title="NotchHub — скриншот"
@@ -518,7 +524,38 @@ final class ScreenshotController {
             }
         }
     }
+    func reopen(_ editor: ScreenshotEditor) {
+        if active { finish() }
+        active = true
+        editor.close = { [weak self] in self?.finish() }
+        editors = [editor]
+        let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? CGRect(x: 0, y: 0, width: 900, height: 700)
+        let canvas = ScreenshotCanvas(editor: editor)
+        canvas.updateTools()
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
+        scroll.documentView = canvas
+        let size = CGSize(width: min(max(300, editor.size.width), max(1, visible.width - 80)), height: min(max(220, editor.size.height), max(1, visible.height - 100)))
+        let window = ScreenshotWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "NotchHub — редактировать скриншот"
+        window.isReleasedWhenClosed = false; window.contentView = scroll
+        windows = [window]
+        reopenedObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.finish() }
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
+            guard event.keyCode == 53, event.window === window else { return event }
+            self?.finish(); return nil
+        }
+        window.center(); NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil); window.makeFirstResponder(canvas)
+    }
     func finish() {
+        guard active || captureTask != nil else { return }
+        if let reopenedObserver { NotificationCenter.default.removeObserver(reopenedObserver) }
+        reopenedObserver = nil
+        // Mark inactive before callbacks/closing windows so nested finish events
+        // cannot archive or notify twice.
+        active = false
+        if let archiveEditor { editors.filter(\.valid).forEach(archiveEditor) }
         generation = UUID()
         captureTask?.cancel(); captureTask = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }

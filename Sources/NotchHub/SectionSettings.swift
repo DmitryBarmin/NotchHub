@@ -33,17 +33,25 @@ enum HubSection: Int, CaseIterable, Identifiable {
 struct SectionVisibility: Equatable {
     var mask: Int = 15
     var showScreenshotButton = true
+    var pinnedCommands: Set<HubCommand> = []
     static let screenshotButtonKey = "showScreenshotButton"
+    static let pinnedCommandsKey = "pinnedHubCommands"
     static let all = SectionVisibility()
     static let preferenceKey = "visibleHubSections"
     var firstVisible: HubSection? { HubSection.allCases.first { isEnabled($0) } }
     var isEmpty: Bool { firstVisible == nil }
     func isEnabled(_ section: HubSection) -> Bool { mask & (1 << section.rawValue) != 0 }
     func isEnabled(tab: Int) -> Bool { HubSection(rawValue: tab).map(isEnabled) ?? false }
+    func visibleCommands(enabledFeatures: Set<HubFeature>) -> [HubCommand] {
+        HubCommand.allCases.filter { command in
+            pinnedCommands.contains(command) && (command.feature.map(enabledFeatures.contains) ?? true)
+        }
+    }
     static func load(from defaults: UserDefaults) -> SectionVisibility {
         let mask = defaults.object(forKey: preferenceKey) as? Int
         return SectionVisibility(mask: mask.map { (0...15).contains($0) ? $0 : 15 } ?? 15,
-                                 showScreenshotButton: defaults.object(forKey: screenshotButtonKey) as? Bool ?? true)
+                                 showScreenshotButton: defaults.object(forKey: screenshotButtonKey) as? Bool ?? true,
+                                 pinnedCommands: Set((defaults.stringArray(forKey: pinnedCommandsKey) ?? []).compactMap(HubCommand.init(rawValue:))))
     }
 }
 
@@ -59,6 +67,15 @@ final class SectionSettings: ObservableObject {
         current.showScreenshotButton = enabled
         defaults.set(enabled, forKey: SectionVisibility.screenshotButtonKey)
         changed(current)
+    }
+    func setCommand(_ command: HubCommand, enabled: Bool) {
+        var updated = current
+        if enabled { updated.pinnedCommands.insert(command) }
+        else { updated.pinnedCommands.remove(command) }
+        guard updated != current else { return }
+        current = updated
+        defaults.set(updated.pinnedCommands.map(\.rawValue).sorted(), forKey: SectionVisibility.pinnedCommandsKey)
+        changed(updated)
     }
     func set(_ section: HubSection, enabled: Bool) {
         var updated = current

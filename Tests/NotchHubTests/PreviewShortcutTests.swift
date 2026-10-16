@@ -4,7 +4,7 @@ import Carbon
 @testable import NotchHub
 
 final class PreviewShortcutTests: XCTestCase {
-    func testHeldPreviewSurvivesRunLoopUpdatesSelectionAndClosesOnRelease() throws {
+    @MainActor func testHeldPreviewSurvivesRunLoopUpdatesSelectionAndClosesOnRelease() throws {
         _ = NSApplication.shared
         let screen = try XCTUnwrap(NSScreen.screens.first)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

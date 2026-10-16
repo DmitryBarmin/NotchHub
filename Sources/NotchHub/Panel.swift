@@ -26,6 +26,12 @@ final class HubState: ObservableObject {
     @Published var tab = 0
     @Published var keyboardSelecting = false
     @Published var selectedClipboardID: UUID?
+    @Published var actionClipID: UUID?
+    @Published var favoritesOnly = false
+    @Published var batchMode = false
+    @Published var batchIDs: Set<UUID> = []
+    var runCommand: ((HubCommand, Clip?) -> Void)?
+    var editWorkspace: ((UUID?) -> Void)?
     var reveal: (() -> Void)?
     var hide: (() -> Void)?
     var showPreview: ((Clip?) -> Void)?
@@ -36,6 +42,17 @@ final class HubState: ObservableObject {
         guard !visibility.isEnabled(tab: tab) else { return false }
         tab = visibility.firstVisible?.rawValue ?? -1
         previewClip = nil; keyboardSelecting = false; selectedClipboardID = nil
+        return true
+    }
+    @discardableResult func beginBatchSelection() -> Bool {
+        let target: Int
+        if (tab == 0 || tab == 1), sections.isEnabled(tab: tab) { target = tab }
+        else if sections.isEnabled(.clipboard) { target = 0 }
+        else if sections.isEnabled(.shelf) { target = 1 }
+        else { return false }
+        if target != tab { favoritesOnly = false }
+        showPreview?(nil); previewClip = nil
+        tab = target; batchMode = true; batchIDs = []
         return true
     }
     static func atTrigger(_ point: CGPoint, screen: CGRect, notchWidth: CGFloat) -> Bool {
@@ -277,19 +294,21 @@ struct HubView: View {
     @ObservedObject var store: HubStore
     @ObservedObject var clock: FocusClock
     @ObservedObject var state: HubState
+    @ObservedObject var preferences: HubPreferences
     @State private var search = ""
     @State private var dropTarget = false
     @State private var confirmClear = false
     @State private var clearClipboard = false
     @State private var searching = false
     private let accent = Color(red: 0.64, green: 0.77, blue: 1)
+    init(store: HubStore, clock: FocusClock, state: HubState) { self.store = store; self.clock = clock; self.state = state; self.preferences = store.preferences }
     var body: some View {
         VStack(spacing: 0) {
             // Keep all interactive content below the physical camera cutout.
             Color.clear.frame(height: state.expanded ? state.notchHeight : state.collapsedHeight)
             if state.expanded {
                 HStack(spacing: 0) {
-                    if state.sections.showScreenshotButton || !state.sections.isEmpty {
+                    if state.sections.showScreenshotButton || !state.sections.isEmpty || !railCommands.isEmpty {
                         navigationRail
                     }
                     content.frame(maxWidth: .infinity)
@@ -338,7 +357,11 @@ struct HubView: View {
         .onChange(of: state.sections) { _, _ in confirmClear = false; search = ""; searching = false }
         .onChange(of: confirmClear) { _, shown in state.dialogPresented = shown }
         .onChange(of: state.keyboardSelecting) { _, selecting in
-            if selecting { search = ""; searching = false }
+            if selecting { search = ""; searching = false; state.favoritesOnly = false; state.batchMode = false }
+        }
+        .onChange(of: preferences.current) { _, value in
+            if !value.enabled.contains(.favorites) { state.favoritesOnly = false }
+            if !value.enabled.contains(.batchActions) { state.batchMode = false; state.batchIDs = [] }
         }
         .alert(clearClipboard ? "Очистить весь буфер обмена?" : "Удалить все элементы?", isPresented: $confirmClear) {
             Button("Отмена", role: .cancel) { }
@@ -362,19 +385,59 @@ struct HubView: View {
                             .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
                             .foregroundStyle(.white.opacity(0.85))
                     }
-                    .buttonStyle(.plain).help("Сделать скриншот").accessibilityLabel("Сделать скриншот")
+                    .buttonStyle(.plain).help("Сделать скриншот\nВыдели область экрана, добавь пометки, скопируй или сохрани изображение.").accessibilityLabel("Сделать скриншот")
                     .padding(.bottom, 3)
                 }
                 if state.sections.isEnabled(.clipboard) { tab("Буфер", icon: "doc.on.clipboard", index: 0) }
                 if state.sections.isEnabled(.shelf) { tab("Полка", icon: "tray", index: 1) }
                 if state.sections.isEnabled(.note) { tab("Заметка", icon: "square.and.pencil", index: 2) }
                 if state.sections.isEnabled(.timer) { tab("Фокус", icon: "timer", index: 3) }
+                if !railCommands.isEmpty {
+                    Rectangle().fill(Color.white.opacity(0.14)).frame(width: 16, height: 1).padding(.vertical, 3)
+                    ForEach(railCommands) { command in railAction(command) }
+                }
             }
             .frame(width: 28).padding(.vertical, 4)
         }
         .scrollIndicators(.hidden)
         .frame(width: 28)
         .padding(.leading, 6)
+    }
+    private var railCommands: [HubCommand] {
+        state.sections.visibleCommands(enabledFeatures: preferences.current.enabled)
+    }
+    @ViewBuilder private func railAction(_ command: HubCommand) -> some View {
+        if command == .openWorkspaces {
+            Menu { workspaceOptions } label: { railIcon(command) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .help(railHelp(command)).accessibilityLabel(command.title)
+        } else {
+            Button { state.runCommand?(command, nil) } label: { railIcon(command) }
+                .buttonStyle(.plain)
+                .help(railHelp(command))
+                .accessibilityLabel(command.title)
+        }
+    }
+    private func railHelp(_ command: HubCommand) -> String {
+        switch command {
+        case .openFavorites: return "Избранное и шаблоны\nОткрой закреплённые элементы и часто используемые тексты."
+        case .transformText: return "Преобразовать текст\nИзмени раскладку или регистр выбранного текста, отформатируй JSON или очисти ссылку."
+        case .detachPreview: return "Отдельный предпросмотр\nОткрой выбранный элемент в отдельном окне, которое останется доступно после сворачивания панели."
+        case .recognizeImage: return "Распознать изображение\nИзвлеки текст из выбранной картинки. Распознавание выполняется на Mac."
+        case .batchCopy: return "Копировать выбранное\nВыбери несколько элементов, затем объедини тексты или скопируй файлы вместе."
+        case .openWorkspaces: return "Рабочие наборы\nПереключай наборы с отдельными полкой и заметкой или создай новый набор."
+        case .openScreenshots: return "История скриншотов\nОткрой сохранённый фрагмент экрана и продолжи редактирование."
+        case .openTimers: return "Таймеры\nСоздавай отдельные таймеры для задач, запускай и приостанавливай отсчёт."
+        case .share: return "Передача и QR\nПередай выбранные элементы на другой Mac ссылкой или через AirDrop, создай QR-код."
+        case .toggleCapture:
+            return store.paused ? "Продолжить запись буфера\nНовые скопированные элементы снова будут сохраняться в истории." : "Приостановить запись буфера\nНовые копии временно не сохраняются. Уже записанная история остаётся доступной."
+        }
+    }
+    private func railIcon(_ command: HubCommand) -> some View {
+        Image(systemName: command == .toggleCapture ? (store.paused ? "play.circle" : "pause.circle") : command.feature?.icon ?? "bolt")
+            .font(.system(size: 11)).frame(width: 24, height: 22)
+            .foregroundStyle(command == .toggleCapture && store.paused ? Color.orange : Color.white.opacity(0.7))
+            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
     }
     private var toolbar: some View {
         HStack(spacing: 3) {
@@ -385,6 +448,14 @@ struct HubView: View {
                     Image(systemName: "trash").frame(width: 20, height: 20)
                 }.help("Очистить весь буфер обмена").accessibilityLabel("Очистить весь буфер обмена")
                 Menu {
+                    if preferences.isEnabled(.favorites) {
+                        Button(state.favoritesOnly ? "Вся история" : "Избранное") { state.favoritesOnly.toggle(); state.tab = 0; state.showPreview?(nil) }
+                        Button("Шаблоны…") { state.runCommand?(.openFavorites, nil) }
+                    }
+                    if preferences.isEnabled(.screenshotHistory) { Button("История скриншотов…") { state.runCommand?(.openScreenshots, nil) } }
+                    if preferences.isEnabled(.multipleTimers) { Button("Таймеры…") { state.runCommand?(.openTimers, nil) } }
+                    if preferences.isEnabled(.batchActions), state.tab < 2 { Button(state.batchMode ? "Завершить выбор" : "Выбрать несколько") { state.batchMode.toggle(); state.batchIDs = [] } }
+                    Divider()
                     if state.tab >= 0 && state.tab < 2 {
                         Button(searching ? "Скрыть поиск" : "Поиск") { searching.toggle(); if !searching { search = "" } }
                         Button("Очистить", role: .destructive) { clearClipboard = false; confirmClear = true }
@@ -410,6 +481,7 @@ struct HubView: View {
                             Button { state.showPreview?(nil) } label: { Image(systemName: "chevron.left") }.help("Назад к списку")
                             Text(clip.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
                             Spacer()
+                            clipActions(clip)
                             Button { store.copy(clip) } label: { Label("Копировать", systemImage: "doc.on.doc") }.font(.system(size: 11))
                         }.buttonStyle(.plain).padding(.horizontal, 5)
                         ClipPreviewView(clip: clip, url: store.assetURL(clip), backgroundOpacity: state.previewOpacity).id(clip.id)
@@ -429,7 +501,7 @@ struct HubView: View {
                     .font(.system(size: 8)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
                 Spacer(minLength: 0)
                 if state.tab >= 0 && state.tab < 2 {
-                    Text("\((state.tab == 1 ? store.archive.shelf : store.archive.clips).count)/20")
+                    Text(state.tab == 1 ? "\(store.activeShelf.count)" : "\(state.favoritesOnly ? store.archive.favorites.count : store.archive.clips.count)/\(preferences.current.historyLimit)")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
                 }.frame(height: 9)
@@ -439,18 +511,22 @@ struct HubView: View {
         .frame(height: state.expandedHeight - state.notchHeight)
     }
     private func tab(_ title: String, icon: String, index: Int) -> some View {
-        Button { state.showPreview?(nil); state.tab = index; search = ""; searching = false; store.message = nil } label: {
+        Button { state.showPreview?(nil); state.tab = index; state.favoritesOnly = false; state.batchMode = false; state.batchIDs = []; search = ""; searching = false; store.message = nil } label: {
             Image(systemName: icon).font(.system(size: 11))
                 .frame(width: 24, height: 22)
                 .background(RoundedRectangle(cornerRadius: 6).fill(state.tab == index ? Color.white.opacity(0.14) : .clear))
                 .foregroundStyle(state.tab == index ? accent : Color.white.opacity(0.55))
-        }.buttonStyle(.plain).help(title).accessibilityLabel(title)
+        }.buttonStyle(.plain).help(title + "\n" + (HubSection(rawValue: index)?.detail ?? "")).accessibilityLabel(title)
     }
     private var items: [Clip] {
-        (state.tab == 1 ? store.archive.shelf : store.archive.clips).filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || ($0.text?.localizedCaseInsensitiveContains(search) ?? false) }
+        itemSource.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || ($0.text?.localizedCaseInsensitiveContains(search) ?? false) }
     }
+    private var itemSource: [Clip] { state.tab == 1 ? store.activeShelf : (state.favoritesOnly ? store.archive.favorites : store.archive.clips) }
     private var clipsView: some View {
         VStack(spacing: 1) {
+            if state.tab == 1 && preferences.isEnabled(.workspaces) { workspaceSelector }
+            if state.favoritesOnly { HStack { Label("Избранное", systemImage: "star.fill").font(.system(size: 10)); Spacer(); Button("Все") { state.favoritesOnly = false }.font(.system(size: 10)) }.foregroundStyle(accent) }
+            if state.batchMode { batchBar }
             if searching {
                 TextField("Поиск…", text: $search).textFieldStyle(.plain).font(.system(size: 10))
                     .padding(.horizontal, 4).frame(height: 16)
@@ -476,22 +552,27 @@ struct HubView: View {
     }
     private func row(_ clip: Clip) -> some View {
         HStack(spacing: 6) {
-            Button { store.copy(clip) } label: {
+            if state.batchMode {
+                Button { if state.batchIDs.contains(clip.id) { state.batchIDs.remove(clip.id) } else { state.batchIDs.insert(clip.id) } } label: { Image(systemName: state.batchIDs.contains(clip.id) ? "checkmark.circle.fill" : "circle").foregroundStyle(accent) }.buttonStyle(.plain).help("Выбрать элемент")
+            }
+            Button { state.actionClipID = clip.id; if state.batchMode { if state.batchIDs.contains(clip.id) { state.batchIDs.remove(clip.id) } else { state.batchIDs.insert(clip.id) } } else { store.copy(clip) } } label: {
                 HStack(spacing: 6) {
                     preview(clip).frame(width: searching ? 16 : 24, height: searching ? 16 : 24).background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8)).clipped()
                     Text(clip.title).font(.system(size: 11, weight: .medium)).lineLimit(1)
                     Spacer()
-                    Image(systemName: "doc.on.doc").foregroundStyle(.white.opacity(0.35))
+                    Image(systemName: store.isFavorite(clip) ? "star.fill" : "doc.on.doc").foregroundStyle(.white.opacity(0.35))
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
-            Button { state.showPreview?(clip) } label: {
+            Button { state.actionClipID = clip.id; state.showPreview?(clip) } label: {
                 Image(systemName: "eye").font(.system(size: 11)).foregroundStyle(.white.opacity(0.7))
             }.buttonStyle(.plain).help("Предпросмотр").accessibilityLabel("Предпросмотр: \(clip.title)")
-            Button { store.remove(clip) } label: { Image(systemName: "xmark").font(.system(size: 10)).foregroundStyle(.secondary) }.buttonStyle(.plain).help("Удалить")
+            clipActions(clip)
         }.padding(4).background(state.selectedClipboardID == clip.id ? accent.opacity(0.25) : Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
             .overlay { RoundedRectangle(cornerRadius: 7).stroke(state.selectedClipboardID == clip.id ? accent.opacity(0.8) : .clear, lineWidth: 1) }
             .onDrag { store.provider(clip) }
             .contextMenu {
+                clipActionButtons(clip)
+                Divider()
                 Button("Предпросмотр") { state.showPreview?(clip) }
                 Button("Копировать") { store.copy(clip) }
                 if let url = store.assetURL(clip) { Button("Открыть") { NSWorkspace.shared.open(url) }; Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
@@ -508,7 +589,7 @@ struct HubView: View {
     }
     private var noteView: some View {
         HStack(spacing: 4) {
-            TextEditor(text: Binding(get: { store.archive.note }, set: { store.setNote($0) }))
+            TextEditor(text: Binding(get: { store.currentNote }, set: { store.setNote($0) }))
                 .font(.system(size: 11)).scrollContentBackground(.hidden).padding(2)
                 .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
             Button { copyNote() } label: { Image(systemName: "doc.on.doc").font(.system(size: 11)) }
@@ -516,7 +597,7 @@ struct HubView: View {
         }
     }
     func copyNote() {
-        guard store.addText(store.archive.note), let clip = store.archive.clips.first else { return }
+        guard store.addText(store.currentNote), let clip = store.archive.clips.first else { return }
         store.copy(clip)
     }
     private var focusView: some View {
@@ -533,6 +614,7 @@ struct HubView: View {
             } label: { Image(systemName: "clock").font(.system(size: 12)) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Длительность")
             Button { clock.reset() } label: { Image(systemName: "arrow.counterclockwise").font(.system(size: 12)) }.help("Сбросить")
+            if preferences.isEnabled(.multipleTimers) { Button { state.runCommand?(.openTimers, nil) } label: { Image(systemName: "list.bullet") }.help("Все таймеры") }
         }.buttonStyle(.plain).padding(.horizontal, 4)
     }
     func receive(_ providers: [NSItemProvider]) -> Bool {
@@ -578,5 +660,43 @@ struct HubView: View {
         let bytes = sizes.isEmpty ? Double(image.size.width) * Double(image.size.height) * 4 : sizes.reduce(0, +)
         guard bytes > 0, bytes <= Double(HubStore.maxBytes) else { return nil }
         return image.tiffRepresentation
+    }
+    @ViewBuilder private var workspaceOptions: some View {
+        Button("Общая полка") { store.selectWorkspace(nil) }
+        ForEach(store.archive.workspaces) { workspace in Button(workspace.name) { store.selectWorkspace(workspace.id) } }
+        Divider(); Button("Новый набор…") { state.editWorkspace?(nil) }
+        if let id = store.archive.activeWorkspaceID {
+            Button("Переименовать…") { state.editWorkspace?(id) }
+            Button("Убрать набор, сохранив содержимое") { store.removeWorkspace(id) }
+        }
+    }
+    private var workspaceSelector: some View {
+        Menu { workspaceOptions } label: { HStack { Image(systemName: "square.stack"); Text(store.archive.workspaces.first { $0.id == store.archive.activeWorkspaceID }?.name ?? "Общая полка").lineLimit(1); Spacer(); Image(systemName: "chevron.down") }.font(.system(size: 10)) }.menuStyle(.borderlessButton).menuIndicator(.hidden).padding(.horizontal, 4)
+    }
+    private var batchBar: some View {
+        let selected = itemSource.filter { state.batchIDs.contains($0.id) }
+        return HStack(spacing: 8) {
+            Text("\(selected.count) выбрано").font(.system(size: 10))
+            Button { _ = store.copyBatch(selected) } label: { Image(systemName: "doc.on.doc") }.help("Копировать выбранное").disabled(selected.isEmpty)
+            BatchDragHandle(clips: selected, store: store).frame(width: 70, height: 18)
+            if preferences.isEnabled(.sharing) { Button { state.runCommand?(.share, nil) } label: { Image(systemName: "paperplane") }.help("Передать выбранное").disabled(selected.isEmpty) }
+            Spacer(); Button { state.batchMode = false; state.batchIDs = [] } label: { Image(systemName: "xmark") }.help("Завершить выбор")
+        }.buttonStyle(.plain).padding(4)
+    }
+    private func clipActions(_ clip: Clip) -> some View {
+        Menu { clipActionButtons(clip) } label: { Image(systemName: "ellipsis.circle").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65)) }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Действия с элементом")
+    }
+    @ViewBuilder private func clipActionButtons(_ clip: Clip) -> some View {
+        if preferences.isEnabled(.favorites) { Button(store.isFavorite(clip) ? "Убрать из избранного" : "В избранное") { store.toggleFavorite(clip) } }
+        if preferences.isEnabled(.textTools), clip.text != nil { Button("Преобразовать текст…") { state.runCommand?(.transformText, clip) } }
+        if preferences.isEnabled(.detachedPreview) { Button("Открепить предпросмотр") { state.runCommand?(.detachPreview, clip) } }
+        if preferences.isEnabled(.imageOCR), clip.kind == .image { Button("Распознать текст…") { state.runCommand?(.recognizeImage, clip) } }
+        if preferences.isEnabled(.sharing) { Button("Передать / поделиться…") { state.runCommand?(.share, clip) } }
+        if preferences.isEnabled(.workspaces) {
+            Menu("В рабочий набор") {
+                Button("Общая полка") { store.moveToWorkspace(clip, id: nil) }
+                ForEach(store.archive.workspaces) { workspace in Button(workspace.name) { store.moveToWorkspace(clip, id: workspace.id) } }
+            }
+        }
     }
 }

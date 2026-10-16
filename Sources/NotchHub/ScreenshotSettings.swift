@@ -157,8 +157,9 @@ final class EditorShortcutSettings: ObservableObject {
     }
 }
 struct EditorShortcutCard: View {
-    @ObservedObject var settings=EditorShortcutSettings.shared
-    @State private var draft=EditorShortcutSettings.shared.current
+    @ObservedObject var settings: EditorShortcutSettings
+    @State private var draft: [String: ClipboardShortcut]
+    init(settings: EditorShortcutSettings = .shared) { self.settings = settings; _draft = State(initialValue: settings.current) }
     func binding(_ action: ScreenshotAction) -> Binding<ClipboardShortcut> {
         Binding(get:{draft[action.rawValue] ?? action.standard},set:{draft[action.rawValue]=$0})
     }

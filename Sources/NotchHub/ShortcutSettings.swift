@@ -99,9 +99,15 @@ struct ShortcutSettingsView: View {
     @ObservedObject var screenshots: ScreenshotSettings
     @ObservedObject var previews: ScreenshotSettings
     @ObservedObject var updater: AppUpdater
+    @ObservedObject var preferences: HubPreferences
+    @ObservedObject var commands: CommandShortcuts
+    @ObservedObject var transferSettings: TransferSettings
+    @ObservedObject var editorSettings: EditorShortcutSettings
     @State private var draft: ClipboardShortcut
-    @State private var page = 0
-    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings, updater: AppUpdater) {
+    @State private var page: Int? = 0
+    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings, updater: AppUpdater, preferences: HubPreferences, commands: CommandShortcuts, transferSettings: TransferSettings, editorSettings: EditorShortcutSettings) {
+        self.preferences = preferences; self.commands = commands; self.transferSettings = transferSettings
+        self.editorSettings = editorSettings
         self.updater = updater
         self.previews = previews
         self.screenshots = screenshots
@@ -111,38 +117,45 @@ struct ShortcutSettingsView: View {
         Binding(get: { draft.modifiers & flag != 0 }, set: { if $0 { draft.modifiers |= flag } else { draft.modifiers &= ~flag } })
     }
     var body: some View {
-        VStack(spacing: 18) {
-            HStack(spacing: 12) {
-                Image(systemName: "capsule.inset.filled").font(.system(size: 25, weight: .medium)).foregroundStyle(.blue)
-                    .frame(width: 48, height: 48).background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("NotchHub").font(.system(size: 23, weight: .semibold))
-                    Text("Настрой под себя").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            Picker("Настройки", selection: $page) {
-                Text("Основные").tag(0)
-                Text("Размеры").tag(1)
-                Text("Клавиши").tag(2)
-                Text("Обновления").tag(3)
-            }.pickerStyle(.segmented).controlSize(.large).labelsHidden()
+        NavigationSplitView {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("NotchHub", systemImage: "capsule.inset.filled").font(.title2.weight(.semibold)).padding(.horizontal, 16).padding(.top, 20)
+                List(selection: $page) {
+                    Label("Общие", systemImage: "square.grid.2x2").tag(0)
+                    Label("Возможности", systemImage: "switch.2").tag(1)
+                    Label("Хранилище", systemImage: "internaldrive").tag(2)
+                    Label("Размеры", systemImage: "arrow.up.left.and.arrow.down.right").tag(3)
+                    Label("Клавиши", systemImage: "keyboard").tag(4)
+                    Label("Передача", systemImage: "paperplane").tag(5)
+                    Label("Обновления", systemImage: "arrow.triangle.2.circlepath").tag(6)
+                }.listStyle(.sidebar)
+            }.navigationSplitViewColumnWidth(min: 165, ideal: 180, max: 200)
+        } detail: {
             ScrollView {
-                Group {
-                    switch page {
-                    case 0: sectionsCard
-                    case 1: LayoutSettingsView(settings: layout)
-                    case 3: updatesCard
-                    default: VStack(spacing: 16) { shortcutCard; ScreenshotShortcutCard(settings: previews, title: "Предпросмотр буфера", detail: "При переключении буфера удерживай эту комбинацию. Отпусти клавишу — предпросмотр скроется."); ScreenshotShortcutCard(settings: screenshots); EditorShortcutCard() }
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(pageTitle).font(.system(size: 23, weight: .semibold))
+                    switch page ?? 0 {
+                    case 0:
+                        sectionsCard
+                        sidebarActionsCard
+                    case 1: FeatureSettingsView(preferences: preferences)
+                    case 2: StoragePrivacySettingsView(preferences: preferences)
+                    case 3: LayoutSettingsView(settings: layout)
+                    case 4:
+                        shortcutCard
+                        ScreenshotShortcutCard(settings: previews, title: "Предпросмотр буфера", detail: "При переключении буфера удерживай эту комбинацию. Отпусти клавишу — предпросмотр скроется.")
+                        ScreenshotShortcutCard(settings: screenshots)
+                        CommandShortcutsView(settings: commands)
+                        EditorShortcutCard(settings: editorSettings)
+                    case 5: TransferSettingsView(settings: transferSettings)
+                    default: updatesCard
                     }
-                }.padding(.vertical, 2)
-            }.scrollIndicators(.hidden)
-        }.padding(24)
-        .background {
-            LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            }.background(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing))
         }
         .onChange(of: settings.current) { _, value in draft = value }
     }
+    private var pageTitle: String { ["Общие", "Возможности", "Хранилище и приватность", "Размеры и стекло", "Горячие клавиши", "Передача буфера", "Обновления"][min(6, max(0, page ?? 0))] }
     private var updatesCard: some View {
         SettingsCard {
             VStack(alignment: .leading, spacing: 16) {
@@ -197,6 +210,29 @@ struct ShortcutSettingsView: View {
                         Toggle("Кнопка скриншотера", isOn: Binding(get: { sections.current.showScreenshotButton }, set: { sections.setScreenshotButton(enabled: $0) }))
                             .labelsHidden().toggleStyle(.switch).controlSize(.small)
                     }
+                }
+            }
+        }
+    }
+    private var sidebarActionsCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsHeading(title: "Кнопки левого меню", icon: "sidebar.left")
+                Text("Добавь быстрые действия в панель NotchHub. Если кнопок много, прокрути левое меню.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(HubCommand.allCases) { command in
+                    Toggle(isOn: Binding(get: { sections.current.pinnedCommands.contains(command) }, set: { sections.setCommand(command, enabled: $0) })) {
+                        HStack(spacing: 10) {
+                            Image(systemName: command.feature?.icon ?? "bolt").frame(width: 22).foregroundStyle(.blue)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(command == .openFavorites ? "Избранное и шаблоны" : command.title).font(.system(size: 13, weight: .medium))
+                                if let feature = command.feature, !preferences.isEnabled(feature) {
+                                    Text("Функция выключена — кнопка скрыта").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 12)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.toggleStyle(.switch).controlSize(.small)
                 }
             }
         }
