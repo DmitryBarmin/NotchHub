@@ -16,6 +16,28 @@ final class AppUpdaterTests: XCTestCase {
         for installed in ["1.4.0", "1.5.0"] { XCTAssertThrowsError(try AppUpdateCore.selectedAsset(release, appName: "NotchHub", repository: "DmitryBarmin/NotchHub", installed: installed)) }
         XCTAssertThrowsError(try AppUpdateCore.selectedAsset(Data("{}".utf8), appName: "NotchHub", repository: "DmitryBarmin/NotchHub", installed: "1.0"))
     }
+    func testReleaseArchiveNamesAndAmbiguity() throws {
+        for appName in ["NotchHub", "GlassDock"] {
+            let repository = "DmitryBarmin/" + appName
+            func asset(_ name: String, urlName: String? = nil) -> [String: Any] {
+                ["name": name, "size": 3, "digest": "sha256:" + String(repeating: "a", count: 64),
+                 "browser_download_url": "https://github.com/\(repository)/releases/download/v3.0.0/\(urlName ?? name)"]
+            }
+            func release(_ assets: [[String: Any]]) throws -> Data {
+                try JSONSerialization.data(withJSONObject: ["tag_name": "v3.0.0", "draft": false, "prerelease": false, "assets": assets])
+            }
+            let legacy = "\(appName)-3.0.0-macOS-arm64.zip", current = "\(appName)-3.0.0.zip"
+            for name in [legacy, current] {
+                let (_, selected) = try AppUpdateCore.selectedAsset(release([asset(name)]), appName: appName, repository: repository, installed: "2.0.0")
+                XCTAssertEqual(selected.name, name)
+            }
+            for assets in [[asset(current), asset(current)], [asset(legacy), asset(current)],
+                           [asset("\(appName)-3.0.0-macOS-x64.zip")], [asset("\(appName)-2.9.0.zip")],
+                           [asset(current, urlName: legacy)]] {
+                XCTAssertThrowsError(try AppUpdateCore.selectedAsset(release(assets), appName: appName, repository: repository, installed: "2.0.0"))
+            }
+        }
+    }
     func testDigestSizeAndAssetOriginFailClosed() throws {
         let bytes = Data("zip bytes".utf8)
         let (_, asset) = try AppUpdateCore.selectedAsset(metadata(version: "2.0", bytes: bytes), appName: "NotchHub", repository: "DmitryBarmin/NotchHub", installed: "1.0")
@@ -34,6 +56,19 @@ final class AppUpdaterTests: XCTestCase {
         XCTAssertThrowsError(try AppUpdateCore.zipEntries(zip([("NotchHub.app/link", Data("/tmp".utf8), 0o120777)]), appName: "NotchHub"))
         XCTAssertThrowsError(try AppUpdateCore.zipEntries(zip([("NotchHub.app/File", Data(), 0o100644), ("NotchHub.app/file", Data(), 0o100644)]), appName: "NotchHub"))
         XCTAssertThrowsError(try AppUpdateCore.zipEntries(zip([("NotchHub.app/file", Data(), 0o100644)], advertised: AppUpdateCore.expandedLimit + 1), appName: "NotchHub"))
+    }
+    func testAppleDoubleMetadataIsValidatedButNotExtracted() throws {
+        let root = temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let archive = zip([("NotchHub.app/Contents/file", Data("payload".utf8), 0o100644),
+                           ("__MACOSX/", Data(), 0o040755),
+                           ("__MACOSX/NotchHub.app/Contents/._file", Data("metadata".utf8), 0o100644)])
+        let app = try AppUpdateCore.extract(archive, appName: "NotchHub", to: root.appendingPathComponent("payload"))
+        XCTAssertEqual(try String(contentsOf: app.appendingPathComponent("Contents/file")), "payload")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: app.deletingLastPathComponent().appendingPathComponent("__MACOSX").path))
+        for path in ["__MACOSX/../outside", "__MACOSX/Other.app/._file", "__MACOSX/NotchHub.app/executable"] {
+            XCTAssertThrowsError(try AppUpdateCore.zipEntries(zip([(path, Data([1]), 0o100644)]), appName: "NotchHub"))
+        }
+        XCTAssertThrowsError(try AppUpdateCore.zipEntries(zip([("__MACOSX/NotchHub.app/._link", Data("/tmp".utf8), 0o120777)]), appName: "NotchHub"))
     }
     func testZIPExtractionChecksActualBytesCRCAndPreservesExecutable() throws {
         let root = temporary(); defer { try? FileManager.default.removeItem(at: root) }
