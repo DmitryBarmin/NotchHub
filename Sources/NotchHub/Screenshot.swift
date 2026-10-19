@@ -91,7 +91,8 @@ final class ScreenshotEditor: NSObject, ObservableObject {
     @Published var message: String?
     var close: (() -> Void)?
     var changed: (() -> Void)?
-    var textWindow: NSWindow?
+    var recognizedText: ((String) -> Void)?
+    private var recognitionGeneration = UUID()
     var shortcuts = EditorShortcutSettings.shared
     var archiveID: UUID?
     init(image: CGImage, size: CGSize) { self.image = image; self.size = size; super.init() }
@@ -178,22 +179,21 @@ final class ScreenshotEditor: NSObject, ObservableObject {
     func recognizeText() {
         guard !recognizing, let crop = exportedImage(annotated: false) else { return }
         recognizing = true; message = nil
+        let generation = UUID(); recognitionGeneration = generation
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try Self.recognize(crop) }
             DispatchQueue.main.async {
-                guard let self else { return }; self.recognizing = false
+                guard let self, self.recognitionGeneration == generation else { return }; self.recognizing = false
                 switch result {
                 case .failure(let error): self.message = error.localizedDescription
                 case .success(let text):
                     if text.isEmpty { self.message = "Текст не найден — выдели область крупнее"; return }
-                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 420), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-                    window.title = "Распознанный текст"; window.isReleasedWhenClosed = false; window.level = .screenSaver
-                    window.contentView = NSHostingView(rootView: RecognizedScreenshotText(text: text))
-                    self.textWindow?.close(); self.textWindow = window; window.center(); window.makeKeyAndOrderFront(nil)
+                    self.recognizedText?(text)
                 }
             }
         }
     }
+    func cancelRecognition() { recognitionGeneration = UUID(); recognizing = false; recognizedText = nil }
 }
 struct RecognizedScreenshotText: View {
     @State var text: String
@@ -457,6 +457,7 @@ final class ScreenshotController {
     private var windows: [NSWindow]=[]
     private var editors: [ScreenshotEditor]=[]
     var archiveEditor: ((ScreenshotEditor) -> Void)?
+    var recognizedText: ((String) -> Void)?
     var editorShortcuts = EditorShortcutSettings.shared
     private var reopenedObserver: NSObjectProtocol?
     private var escapeMonitor: Any?
@@ -506,6 +507,10 @@ final class ScreenshotController {
                 for (screen,image) in captures {
                     let editor=ScreenshotEditor(image:image,size:screen.frame.size)
                     editor.shortcuts = editorShortcuts
+                    editor.recognizedText = { [weak self] text in
+                        guard let self else { return }
+                        self.finish(); self.recognizedText?(text)
+                    }
                     editor.close = { [weak self] in self?.finish() }; editors.append(editor)
                     let window=ScreenshotWindow(contentRect:screen.frame,styleMask:.borderless,backing:.buffered,defer:false)
                     window.title="NotchHub — скриншот"
@@ -527,6 +532,7 @@ final class ScreenshotController {
     func reopen(_ editor: ScreenshotEditor) {
         if active { finish() }
         active = true
+        editor.recognizedText = { [weak self] text in self?.finish(); self?.recognizedText?(text) }
         editor.close = { [weak self] in self?.finish() }
         editors = [editor]
         let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? CGRect(x: 0, y: 0, width: 900, height: 700)
@@ -560,7 +566,21 @@ final class ScreenshotController {
         captureTask?.cancel(); captureTask = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
-        editors.forEach { $0.close=nil; $0.closeColorPanel(); $0.textWindow?.close() };windows.forEach { $0.orderOut(nil);$0.close() }
+        editors.forEach { $0.close=nil; $0.closeColorPanel(); $0.cancelRecognition() };windows.forEach { $0.orderOut(nil);$0.close() }
         editors.removeAll();windows.removeAll();active=false;finished()
     }
+}
+
+/// Reuses the screenshot canvas and native tools inside the notch preview.
+struct EmbeddedScreenshotEditor: NSViewRepresentable {
+    let editor: ScreenshotEditor
+    func makeNSView(context: Context) -> NSScrollView {
+        let canvas = ScreenshotCanvas(editor: editor)
+        canvas.updateTools()
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
+        scroll.documentView = canvas
+        return scroll
+    }
+    func updateNSView(_ view: NSScrollView, context: Context) { }
 }

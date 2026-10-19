@@ -1,56 +1,162 @@
 import AppKit
 import SwiftUI
 
-/// Owns auxiliary windows; closing a window releases its view and background tasks.
-final class HubWindows: NSObject, NSWindowDelegate {
-    private var windows: [String: NSWindow] = [:]
-    private var closed: [String: () -> Void] = [:]
+/// A feature lives in the existing notch panel, including its cancellation lifetime.
+final class HubSurface: Identifiable {
+    let id = UUID()
+    let key: String
+    let title: String
+    let content: AnyView
+    init(key: String, title: String, content: AnyView) { self.key = key; self.title = title; self.content = content }
+}
+
+final class HubWindows {
+    var present: ((HubSurface?) -> Void)?
+    private var key: String?
+    private var closed: (() -> Void)?
     func show<Content: View>(_ key: String, title: String, size: CGSize = CGSize(width: 640, height: 460), onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
-        if let old = windows[key] { old.close() }
-        let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1000, height: 700)
-        let window = NSWindow(contentRect: CGRect(origin: .zero, size: CGSize(width: min(size.width, visible.width - 40), height: min(size.height, visible.height - 60))), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = title; window.isReleasedWhenClosed = false; window.delegate = self
-        window.contentView = NSHostingView(rootView: content())
-        window.contentMinSize = CGSize(width: min(440, visible.width - 40), height: min(300, visible.height - 60))
-        windows[key] = window
-        closed[key] = onClose
-        window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        closeAll()
+        self.key = key; closed = onClose
+        present?(HubSurface(key: key, title: title, content: AnyView(content())))
     }
-    func close(_ key: String) { windows[key]?.close() }
-    func closeAll() { Array(windows.values).forEach { $0.close() } }
-    func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        let key = windows.first { $0.value === window }?.key
-        windows = windows.filter { $0.value !== window }
-        window.contentView = nil
-        if let key { closed.removeValue(forKey: key)?() }
+    func close(_ key: String) { if self.key == key { closeAll() } }
+    func closeAll() {
+        let callback = closed
+        key = nil; closed = nil
+        present?(nil)
+        callback?()
+    }
+}
+
+struct FormattingInput {
+    let text: String
+    let externalSelection: ExternalTextSelection?
+    let notice: String
+    static func resolve(external: () throws -> FormattingInput, clipboard: () throws -> String) -> FormattingInput {
+        do { return FormattingInput(text: try clipboard(), externalSelection: nil, notice: "Текст из буфера — результат можно скопировать") }
+        catch {
+            let clipboardError = error.localizedDescription
+            do { return try external() }
+            catch { return FormattingInput(text: "", externalSelection: nil, notice: error.localizedDescription + "\n" + clipboardError) }
+        }
     }
 }
 
 struct TextToolsView: View {
     @ObservedObject var store: HubStore
     @State var input: String
-    @State private var transform = TextTransform.plainText
-    @State private var result = ""
+    @State var externalSelection: ExternalTextSelection?
+    @State var notice = ""
+    var readClipboard: ((Bool) throws -> String)?
+    @State private var selection = NSRange(location: 0, length: 0)
+    @State private var showFormats = false
     @State private var error: String?
-    private func convert() {
-        do { result = try transform.apply(to: input); error = nil }
-        catch { self.error = error.localizedDescription; result = "" }
+    @State private var editor: NSTextView?
+    @State private var externalApplied = false
+    private func convert(_ transform: TextTransform) {
+        do {
+            if let externalSelection {
+                let result = try transform.apply(to: input)
+                try externalSelection.replace(with: result)
+                input = result; showFormats = false; externalApplied = true
+                error = "Текст изменён в исходном приложении"
+            } else if let editor {
+                let range = selection.length > 0 ? selection : NSRange(location: 0, length: (input as NSString).length)
+                let replacement = try TextSelectionTransform.apply(transform, to: input, range: range)
+                guard editor.shouldChangeText(in: range, replacementString: replacement.text) else { return }
+                editor.textStorage?.replaceCharacters(in: range, with: replacement.text)
+                editor.didChangeText(); editor.setSelectedRange(replacement.selection)
+                editor.window?.makeFirstResponder(editor)
+                showFormats = false; error = nil
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+    private func importClipboard() {
+        do {
+            input = try readClipboard?(false) ?? store.textForFormatting(automatic: false, from: .general)
+            externalSelection = nil; externalApplied = false; error = nil
+            selection = NSRange(location: 0, length: 0)
+            editor?.setSelectedRange(selection)
+            notice = "Текст из буфера — результат можно скопировать"
+        } catch { self.error = error.localizedDescription }
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Picker("Действие", selection: $transform) { ForEach(TextTransform.allCases) { Text($0.title).tag($0) } }
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                VStack(alignment: .leading) { Text("Исходный текст").font(.caption).foregroundStyle(.secondary); TextEditor(text: $input).font(.system(.body, design: .monospaced)) }
-                VStack(alignment: .leading) { Text("Результат").font(.caption).foregroundStyle(.secondary); TextEditor(text: .constant(result)).font(.system(.body, design: .monospaced)) }
-            }
-            if let error { Text(error).foregroundStyle(.red).font(.caption) }
-            HStack {
-                Text("Обработка на Mac · исходник сохраняется").font(.caption).foregroundStyle(.secondary)
+                Text(externalSelection == nil ? "Выдели текст и выбери формат" : "Формат применяется к выделению в исходном приложении").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Копировать результат") { if store.addText(result), let clip = store.archive.clips.first { store.copy(clip) } }.buttonStyle(.borderedProminent).disabled(result.isEmpty || error != nil)
+                Button("Из буфера", action: importClipboard).help("Прочитать текущий текст из буфера")
+                Button { showFormats.toggle() } label: { Label("Формат", systemImage: "textformat") }
+                    .disabled(externalApplied || input.isEmpty)
+                    .popover(isPresented: $showFormats, arrowEdge: .trailing) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(44), spacing: 4), count: 4), spacing: 4) {
+                            ForEach(TextTransform.allCases) { transform in
+                                Button { convert(transform) } label: {
+                                    Group {
+                                        if let example = transform.caseExample {
+                                            Text(example).font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        } else { Image(systemName: transform.symbol) }
+                                    }.frame(width: 44, height: 32)
+                                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                                        .contentShape(Rectangle())
+                                }.buttonStyle(.plain).help(transform.title).accessibilityLabel(transform.title)
+                            }
+                        }.padding(10)
+                    }
             }
-        }.padding(20).onAppear { convert() }.onChange(of: transform) { _, _ in convert() }.onChange(of: input) { _, _ in convert() }
+            if !notice.isEmpty { Text(notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if input.isEmpty { Text("Вставь текст в поле или скопируй его и нажми «Из буфера»").font(.caption).foregroundStyle(.secondary) }
+            SelectionTextEditor(text: $input, selection: $selection, editor: $editor, editable: externalSelection == nil)
+                .frame(maxWidth: .infinity, minHeight: 80, maxHeight: .infinity)
+                .layoutPriority(1)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            if let error { Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            HStack {
+                Text("Обработка на Mac").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Копировать текст") {
+                    guard input.utf8.count <= HubStore.maxBytes else { error = "Текст превышает 30 МБ"; return }
+                    store.copy(Clip(kind: .text, title: String(input.prefix(100)), text: input, fingerprint: ""))
+                }.disabled(input.isEmpty)
+            }
+        }.padding(12)
+    }
+}
+
+struct SelectionTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var selection: NSRange
+    @Binding var editor: NSTextView?
+    var editable = true
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        let view = scroll.documentView as! NSTextView
+        view.isRichText = false; view.isEditable = editable; view.isSelectable = true
+        view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
+        view.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        view.backgroundColor = .clear; view.textColor = .labelColor
+        view.textContainerInset = CGSize(width: 8, height: 8)
+        view.allowsUndo = true; view.string = text; view.delegate = context.coordinator
+        scroll.drawsBackground = false
+        DispatchQueue.main.async { editor = view }
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let view = scroll.documentView as? NSTextView else { return }
+        if view.string != text { view.string = text }
+        view.isEditable = editable
+    }
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: SelectionTextEditor
+        init(_ parent: SelectionTextEditor) { self.parent = parent }
+        func textDidChange(_ notification: Notification) {
+            if let view = notification.object as? NSTextView { parent.text = view.string }
+        }
+        func textViewDidChangeSelection(_ notification: Notification) {
+            if let view = notification.object as? NSTextView { parent.selection = view.selectedRange() }
+        }
     }
 }
 

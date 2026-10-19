@@ -4,12 +4,12 @@ import Combine
 import SwiftUI
 
 enum HubCommand: String, CaseIterable, Codable, Identifiable {
-    case openFavorites, transformText, detachPreview, recognizeImage, batchCopy, openWorkspaces, openScreenshots, openTimers, share, toggleCapture
+    case openFavorites, transformText, detachPreview, recognizeImage, batchCopy, openWorkspaces, openScreenshots, openTimers, share, toggleCapture, generateUUID
     var id: String { rawValue }
     var feature: HubFeature? {
         switch self {
         case .openFavorites: return .favorites
-        case .transformText: return .textTools
+        case .transformText, .generateUUID: return .textTools
         case .detachPreview: return .detachedPreview
         case .recognizeImage: return .imageOCR
         case .batchCopy: return .batchActions
@@ -24,7 +24,8 @@ enum HubCommand: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .openFavorites: return "Открыть избранное"
         case .transformText: return "Преобразовать текст"
-        case .detachPreview: return "Отдельный предпросмотр"
+        case .generateUUID: return "Генератор UUID"
+        case .detachPreview: return "Предпросмотр в челке"
         case .recognizeImage: return "Распознать изображение"
         case .batchCopy: return "Копировать выбранное"
         case .openWorkspaces: return "Рабочие наборы"

@@ -20,8 +20,12 @@ final class HubState: ObservableObject {
     @Published var previewClip: Clip?
     @Published var previewWidth: CGFloat = 680
     @Published var previewContentHeight: CGFloat = 400
-    var panelWidth: CGFloat { previewClip == nil ? expandedWidth : previewWidth }
-    var expandedHeight: CGFloat { previewClip == nil ? (sections.isEmpty ? min(panelHeight, notchHeight + 70) : panelHeight) : notchHeight + previewContentHeight }
+    @Published var surface: HubSurface?
+    var closeSurface: (() -> Void)?
+    var showSurface: ((HubSurface?) -> Void)?
+    var hasPreview: Bool { previewClip != nil || surface != nil }
+    var panelWidth: CGFloat { hasPreview ? previewWidth : expandedWidth }
+    var expandedHeight: CGFloat { !hasPreview ? (sections.isEmpty ? min(panelHeight, notchHeight + 70) : panelHeight) : notchHeight + previewContentHeight }
     @Published var hasNotch = true
     @Published var tab = 0
     @Published var keyboardSelecting = false
@@ -30,6 +34,7 @@ final class HubState: ObservableObject {
     @Published var favoritesOnly = false
     @Published var batchMode = false
     @Published var batchIDs: Set<UUID> = []
+    var prepareExternalSelection: (() -> Void)?
     var runCommand: ((HubCommand, Clip?) -> Void)?
     var editWorkspace: ((UUID?) -> Void)?
     var reveal: (() -> Void)?
@@ -64,6 +69,12 @@ final class HubState: ObservableObject {
 }
 
 final class IslandPanel: NSPanel {
+    var beforeInteraction: (() -> Void)?
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .rightMouseDown { beforeInteraction?() }
+        super.sendEvent(event)
+    }
+    override func becomeKey() { beforeInteraction?(); super.becomeKey() }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
@@ -72,7 +83,8 @@ final class IslandPanel: NSPanel {
 /// pointer is over our windows — unlike a global monitor that wakes on every move.
 final class HoverTracker: NSResponder {
     var changed: (() -> Void)?
-    override func mouseEntered(with event: NSEvent) { changed?() }
+    var entered: (() -> Void)?
+    override func mouseEntered(with event: NSEvent) { entered?(); changed?() }
     override func mouseExited(with event: NSEvent) { changed?() }
     override func mouseMoved(with event: NSEvent) { changed?() }
     func track(_ view: NSView) {
@@ -84,6 +96,7 @@ final class PanelController {
     let state: HubState
     let panel: IslandPanel
     private var screen: NSScreen?
+    private var fullscreenVisibility: FullscreenVisibilityController?
     private var layout = HubLayoutPreferences.standard
     private var pointerMonitor: Any?
     private var pointerMonitorTracksMoves = false
@@ -99,6 +112,8 @@ final class PanelController {
         self.screen = screen
         self.layout = layout
         panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.beforeInteraction = { [weak state] in state?.prepareExternalSelection?() }
+        panel.becomesKeyOnlyIfNeeded = true
         panel.acceptsMouseMovedEvents = true
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.level = .statusBar; panel.hidesOnDeactivate = false; panel.isMovable = false
@@ -106,6 +121,7 @@ final class PanelController {
         let hosting = NSHostingView(rootView: HubView(store: store, clock: clock, state: state))
         hosting.sizingOptions = []
         panel.contentView = hosting
+        tracker.entered = { [weak state] in state?.prepareExternalSelection?() }
         tracker.changed = { [weak self] in self?.scheduleHoverCheck() }
         tracker.track(hosting)
         edgePanel.isOpaque = false; edgePanel.backgroundColor = .clear; edgePanel.hasShadow = false
@@ -117,11 +133,36 @@ final class PanelController {
         state.hide = { [weak self] in self?.collapse() }
         state.showPreview = { [weak self] clip in
             guard let self else { return }
+            if self.state.surface != nil { self.state.closeSurface?() }
             withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) { self.state.previewClip = clip }
             self.resize(expanded: self.state.expanded, animate: false)
         }
+        state.showSurface = { [weak self] surface in
+            guard let self else { return }
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                self.state.surface = surface
+                if surface != nil { self.state.previewClip = nil }
+            }
+            self.resize(expanded: self.state.expanded, animate: false)
+            self.fullscreenVisibility?.userInteracted()
+            if surface != nil { self.expand(); self.panel.makeKeyAndOrderFront(nil) }
+        }
         position()
         panel.orderFrontRegardless()
+        fullscreenVisibility = FullscreenVisibilityController(screen: screen, shouldKeepVisible: { [weak self] in
+            guard let self else { return false }
+            return self.state.pinned || self.state.keyboardSelecting || self.state.dialogPresented || self.state.surface != nil
+                || (self.state.expanded && self.panel.frame.contains(NSEvent.mouseLocation)) || NSEvent.pressedMouseButtons != 0
+        }, visibilityChanged: { [weak self] visible in
+            guard let self else { return }
+            if visible {
+                self.panel.orderFrontRegardless()
+                if self.state.topOffset > 0 { self.edgePanel.orderFrontRegardless() }
+            } else {
+                self.panel.orderOut(nil); self.edgePanel.orderOut(nil)
+            }
+        })
+        fullscreenVisibility?.start()
         updatePointerMonitor()
         localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: Self.pointerEvents) { [weak self] event in
             self?.scheduleHoverCheck(); return event
@@ -154,12 +195,17 @@ final class PanelController {
         }
     }
     func dispose() {
+        fullscreenVisibility?.stop(); fullscreenVisibility = nil
+        if state.surface != nil { state.closeSurface?() }
+        state.surface = nil; state.showSurface = nil; state.closeSurface = nil
         if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }
         if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
         pointerMonitor = nil; localPointerMonitor = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
-        tracker.changed = nil
+        tracker.changed = nil; tracker.entered = nil
+        panel.beforeInteraction = nil
+        state.prepareExternalSelection = nil
         edgePanel.orderOut(nil)
         panel.orderOut(nil)
         state.reveal = nil
@@ -169,7 +215,7 @@ final class PanelController {
     }
     func applySectionVisibility(_ visibility: SectionVisibility) {
         let routed = state.applySectionVisibility(visibility)
-        if routed { state.showPreview?(nil) }
+        if routed && state.surface == nil { state.showPreview?(nil) }
     }
     func contains(_ point: CGPoint) -> Bool { screen?.frame.contains(point) ?? false }
     func applyLayout(_ preferences: HubLayoutPreferences) { layout = preferences; position() }
@@ -197,13 +243,16 @@ final class PanelController {
         panel.setFrame(frame, display: true)
     }
     func expand() {
+        fullscreenVisibility?.userInteracted()
         guard !state.expanded else { return }
         resize(expanded: true, animate: false)
         withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) { state.expanded = true }
         updatePointerMonitor()
     }
     func collapse() {
+        fullscreenVisibility?.userInteracted()
         guard state.expanded else { return }
+        if state.surface != nil { state.closeSurface?() }
         withAnimation(.easeOut(duration: 0.12)) { state.expanded = false }
         updatePointerMonitor()
         panel.resignKey()
@@ -228,7 +277,7 @@ final class PanelController {
             let island = NSRect(x: $0.frame.midX - state.collapsedWidth / 2, y: $0.frame.maxY - state.collapsedHeight - state.topOffset, width: state.collapsedWidth, height: state.collapsedHeight)
             return HubState.insideHub(point, panel: panel.frame, screen: $0.frame, notchWidth: state.triggerWidth, island: island)
         } ?? panel.frame.contains(point)
-        if state.pinned || state.keyboardSelecting || state.dialogPresented || inside || NSEvent.pressedMouseButtons != 0 {
+        if state.pinned || state.keyboardSelecting || state.dialogPresented || state.surface != nil || inside || NSEvent.pressedMouseButtons != 0 {
             return
         }
         collapse()
@@ -321,7 +370,7 @@ struct HubView: View {
         .frame(width: state.expanded ? state.panelWidth : state.collapsedWidth, height: state.expanded ? state.expandedHeight : state.collapsedHeight, alignment: .top)
         .background {
             if state.expanded {
-                IslandGlass(notchHeight: state.notchHeight).opacity(state.previewClip == nil ? state.panelOpacity : state.previewOpacity)
+                IslandGlass(notchHeight: state.notchHeight).opacity(state.hasPreview ? state.previewOpacity : state.panelOpacity)
             } else if !state.hasNotch { Color.black.clipShape(Capsule()) }
             else if state.topOffset > 0 || state.collapsedHeight > state.notchHeight + 1 || state.collapsedWidth > state.triggerWidth + 2 {
                 Color.black.clipShape(UnevenRoundedRectangle(topLeadingRadius: 8, bottomLeadingRadius: 8, bottomTrailingRadius: 8, topTrailingRadius: 8))
@@ -421,6 +470,7 @@ struct HubView: View {
     private func railHelp(_ command: HubCommand) -> String {
         switch command {
         case .openFavorites: return "Избранное и шаблоны\nОткрой закреплённые элементы и часто используемые тексты."
+        case .generateUUID: return "Генератор UUID\nСоздавай UUID v4 по одному или списком до 100, копируй выбранный UUID или весь список."
         case .transformText: return "Преобразовать текст\nИзмени раскладку или регистр выбранного текста, отформатируй JSON или очисти ссылку."
         case .detachPreview: return "Отдельный предпросмотр\nОткрой выбранный элемент в отдельном окне, которое останется доступно после сворачивания панели."
         case .recognizeImage: return "Распознать изображение\nИзвлеки текст из выбранной картинки. Распознавание выполняется на Mac."
@@ -434,7 +484,7 @@ struct HubView: View {
         }
     }
     private func railIcon(_ command: HubCommand) -> some View {
-        Image(systemName: command == .toggleCapture ? (store.paused ? "play.circle" : "pause.circle") : command.feature?.icon ?? "bolt")
+        Image(systemName: command == .toggleCapture ? (store.paused ? "play.circle" : "pause.circle") : (command == .generateUUID ? "number" : command.feature?.icon ?? "bolt"))
             .font(.system(size: 11)).frame(width: 24, height: 22)
             .foregroundStyle(command == .toggleCapture && store.paused ? Color.orange : Color.white.opacity(0.7))
             .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
@@ -452,6 +502,7 @@ struct HubView: View {
                         Button(state.favoritesOnly ? "Вся история" : "Избранное") { state.favoritesOnly.toggle(); state.tab = 0; state.showPreview?(nil) }
                         Button("Шаблоны…") { state.runCommand?(.openFavorites, nil) }
                     }
+                    if preferences.isEnabled(.textTools) { Button("Генератор UUID…") { state.runCommand?(.generateUUID, nil) } }
                     if preferences.isEnabled(.screenshotHistory) { Button("История скриншотов…") { state.runCommand?(.openScreenshots, nil) } }
                     if preferences.isEnabled(.multipleTimers) { Button("Таймеры…") { state.runCommand?(.openTimers, nil) } }
                     if preferences.isEnabled(.batchActions), state.tab < 2 { Button(state.batchMode ? "Завершить выбор" : "Выбрать несколько") { state.batchMode.toggle(); state.batchIDs = [] } }
@@ -470,7 +521,16 @@ struct HubView: View {
     private var content: some View {
         VStack(spacing: 3) {
             Group {
-                if state.sections.isEmpty {
+                if let surface = state.surface {
+                    VStack(spacing: 4) {
+                        HStack {
+                            Button { state.closeSurface?() } label: { Image(systemName: "chevron.left") }.help("Назад к хабу").accessibilityLabel("Назад к хабу")
+                            Text(surface.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Spacer()
+                        }.buttonStyle(.plain).padding(.horizontal, 12).padding(.top, 4)
+                        surface.content.id(surface.id).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else if state.sections.isEmpty {
                     VStack(spacing: 5) {
                         Text("Разделы скрыты").font(.system(size: 11)).foregroundStyle(.secondary)
                         Button("Настройки…") { state.openSettings?() }.font(.system(size: 11)).buttonStyle(.plain)
@@ -689,7 +749,7 @@ struct HubView: View {
     @ViewBuilder private func clipActionButtons(_ clip: Clip) -> some View {
         if preferences.isEnabled(.favorites) { Button(store.isFavorite(clip) ? "Убрать из избранного" : "В избранное") { store.toggleFavorite(clip) } }
         if preferences.isEnabled(.textTools), clip.text != nil { Button("Преобразовать текст…") { state.runCommand?(.transformText, clip) } }
-        if preferences.isEnabled(.detachedPreview) { Button("Открепить предпросмотр") { state.runCommand?(.detachPreview, clip) } }
+        if preferences.isEnabled(.detachedPreview) { Button("Открыть предпросмотр") { state.runCommand?(.detachPreview, clip) } }
         if preferences.isEnabled(.imageOCR), clip.kind == .image { Button("Распознать текст…") { state.runCommand?(.recognizeImage, clip) } }
         if preferences.isEnabled(.sharing) { Button("Передать / поделиться…") { state.runCommand?(.share, clip) } }
         if preferences.isEnabled(.workspaces) {

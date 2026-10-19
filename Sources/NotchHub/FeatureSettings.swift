@@ -8,7 +8,7 @@ enum HubFeature: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .favorites: return "Избранное"
         case .textTools: return "Работа с текстом"
-        case .detachedPreview: return "Отдельный предпросмотр"
+        case .detachedPreview: return "Предпросмотр в челке"
         case .imageOCR: return "Текст с изображения"
         case .batchActions: return "Несколько элементов"
         case .privacy: return "Приватность"
@@ -35,8 +35,8 @@ enum HubFeature: String, CaseIterable, Codable, Identifiable {
     var detail: String {
         switch self {
         case .favorites: return "Закрепляй нужные элементы в истории"
-        case .textTools: return "Меняй регистр, раскладку и формат текста"
-        case .detachedPreview: return "Открывай содержимое в отдельном окне"
+        case .textTools: return "Меняй регистр, раскладку и формат текста, создавай UUID"
+        case .detachedPreview: return "Открывай содержимое в расширенной панели челки"
         case .imageOCR: return "Распознавай текст локально на Mac"
         case .batchActions: return "Выбирай и копируй несколько элементов"
         case .privacy: return "Приостанавливай захват и исключай приложения"

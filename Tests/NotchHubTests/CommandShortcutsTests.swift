@@ -97,4 +97,27 @@ final class CommandShortcutsTests: XCTestCase {
         preferences.setFeature(.sharing, enabled: true)
         XCTAssertEqual(registered, 1)
     }
+    func testUUIDShortcutPersistsAndRegistersOnlyWhenTextToolsEnabled() throws {
+        _ = NSApplication.shared
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = HubPreferences(defaults: defaults)
+        preferences.setFeature(.textTools, enabled: false)
+        let key = ClipboardShortcut(keyCode: UInt32(kVK_ANSI_U), modifiers: UInt32(cmdKey | controlKey))
+        var ids: [UInt32] = []
+        var commands: [HubCommand] = []
+        let shortcuts = CommandShortcuts(preferences: preferences, defaults: defaults, register: { _, id, _ in ids.append(id); return noErr }, action: { commands.append($0) })
+        XCTAssertTrue(shortcuts.apply(key, for: .generateUUID))
+        XCTAssertTrue(ids.isEmpty)
+        preferences.setFeature(.textTools, enabled: true)
+        try send(UInt32(kEventHotKeyPressed), id: try XCTUnwrap(ids.last))
+        XCTAssertEqual(commands, [.generateUUID])
+        let saved = try XCTUnwrap(defaults.data(forKey: CommandShortcuts.preferenceKey))
+        XCTAssertEqual(try JSONDecoder().decode([String: ClipboardShortcut].self, from: saved)[HubCommand.generateUUID.rawValue], key)
+        preferences.setFeature(.textTools, enabled: false)
+        XCTAssertEqual(shortcuts.current[.generateUUID], key)
+        try send(UInt32(kEventHotKeyPressed), id: try XCTUnwrap(ids.last), expected: OSStatus(eventNotHandledErr))
+    }
+
 }

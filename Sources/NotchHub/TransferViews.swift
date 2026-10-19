@@ -32,7 +32,12 @@ struct TransferWindowView: View {
     let accept: ([TransferItem]) -> Void
     @State private var invitation = ""
     @State private var invitationError: String?
-    @StateObject private var quickShare = QuickShareController()
+    @State private var qrImage: NSImage?
+    @State private var qrError: String?
+    private func showQR(_ text: String) {
+        do { qrImage = try QuickShareController.qrImage(text: text); qrError = nil }
+        catch { qrError = error.localizedDescription }
+    }
     private func selected(_ clip: Clip) -> Binding<Bool> {
         Binding(get: { service.selectedClips.contains { $0.id == clip.id } }, set: { enabled in
             if enabled {
@@ -41,6 +46,14 @@ struct TransferWindowView: View {
         })
     }
     var body: some View {
+        Group {
+        if let qrImage {
+            VStack(spacing: 10) {
+                Button("Назад к передаче") { self.qrImage = nil }
+                Image(nsImage: qrImage).interpolation(.none).resizable().scaledToFit().padding(16).background(.white)
+                Text("Создан на Mac · без отправки в сеть").font(.caption).foregroundStyle(.secondary)
+            }.padding(12)
+        } else {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
@@ -56,9 +69,11 @@ struct TransferWindowView: View {
                     sendCard
                 }
                 if let message = service.message { Text(message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
-                if let message = quickShare.message { Text(message).font(.caption).foregroundStyle(.secondary) }
+                if let message = qrError { Text(message).font(.caption).foregroundStyle(.secondary) }
             }.padding(24)
-        }.frame(minWidth: 580, minHeight: 500)
+        }
+        }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var incomingCard: some View {
         SettingsCard {
@@ -133,13 +148,13 @@ struct TransferWindowView: View {
                     HStack {
                         Button("Скопировать ссылку") { service.copyLink() }
                         Button("AirDrop…") { service.airDrop() }
-                        Button("QR ссылки") { quickShare.showQR(text: link.absoluteString) }
+                        Button("QR ссылки") { showQR(link.absoluteString) }
                     }
                 }
                 if service.selectedClips.count == 1, let text = service.selectedClips.first?.text {
                     Divider()
                     HStack {
-                        Button("QR текста") { quickShare.showQR(text: text) }.disabled(text.utf8.count > 2048 || text.isEmpty)
+                        Button("QR текста") { showQR(text) }.disabled(text.utf8.count > 2048 || text.isEmpty)
                         TransferTextSharingButton(text: text)
                     }
                     Text("Текст и обычные ссылки можно передать через QR или системное меню без загрузки на сервер.")

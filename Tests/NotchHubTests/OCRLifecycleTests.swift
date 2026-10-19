@@ -34,28 +34,35 @@ final class OCRLifecycleTests: XCTestCase {
         XCTAssertFalse(editor.recognizing)
     }
 
-    @MainActor func testAsyncRecognitionReturnsToIdleAndReplacesPreviousResultWindow() async throws {
+    @MainActor func testAsyncRecognitionDeliversEditableTextWithoutAWindow() async throws {
         let editor = try editor(text: "NOTCH HUB 123")
-        defer { editor.textWindow?.close() }
+        var results: [String] = []
+        editor.recognizedText = { results.append($0) }
         await recognize(editor)
         XCTAssertNil(editor.message)
-        let first = try XCTUnwrap(editor.textWindow)
-        XCTAssertTrue(first.isVisible)
-        XCTAssertEqual(first.title, "Распознанный текст")
+        XCTAssertEqual(results.count, 1)
+        XCTAssertTrue(results[0].contains("NOTCH HUB"))
         await recognize(editor)
-        XCTAssertNil(editor.message)
-        let second = try XCTUnwrap(editor.textWindow)
-        XCTAssertFalse(first === second)
-        XCTAssertFalse(first.isVisible)
-        XCTAssertTrue(second.isVisible)
-        second.close()
-        XCTAssertFalse(second.isVisible)
+        XCTAssertEqual(results.count, 2)
+        editor.cancelRecognition()
+        XCTAssertNil(editor.recognizedText)
+    }
+
+    @MainActor func testCancellationDiscardsInFlightResult() async throws {
+        let editor = try editor(text: "NOTCH HUB 123")
+        var results: [String] = []
+        editor.recognizedText = { results.append($0) }
+        editor.recognizeText()
+        editor.cancelRecognition()
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(editor.recognizing)
+        XCTAssertTrue(results.isEmpty)
     }
 
     @MainActor func testBlankImageReturnsToIdleWithMessageAndNoResultWindow() async throws {
         let editor = try editor()
         await recognize(editor)
         XCTAssertEqual(editor.message, "Текст не найден — выдели область крупнее")
-        XCTAssertNil(editor.textWindow)
+        XCTAssertNil(editor.recognizedText)
     }
 }
