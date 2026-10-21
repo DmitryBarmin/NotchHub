@@ -15,6 +15,8 @@ struct HubTimer: Identifiable, Codable, Equatable {
 final class TimerLibrary: ObservableObject {
     static let preferenceKey = "hubTimerLibraryV1"
     @Published private(set) var timers: [HubTimer]
+    @Published private(set) var focusedTaskID: UUID?
+    static let focusedTaskKey = "hubFocusedTaskV1"
     private let defaults: UserDefaults
     private var timer: Timer?
     var current: HubTimer? { timers.first(where: \.running) ?? timers.first }
@@ -23,6 +25,8 @@ final class TimerLibrary: ObservableObject {
         self.defaults = defaults
         timers = defaults.data(forKey: Self.preferenceKey).flatMap { try? JSONDecoder().decode([HubTimer].self, from: $0) } ?? []
         timers = timers.filter { $0.duration.isFinite && $0.duration > 0 && $0.remaining.isFinite }
+        focusedTaskID = defaults.string(forKey: Self.focusedTaskKey).flatMap(UUID.init(uuidString:))
+        if !timers.contains(where: { $0.id == focusedTaskID }) { focusedTaskID = nil }
         tick(now: now)
         schedule()
     }
@@ -48,7 +52,22 @@ final class TimerLibrary: ObservableObject {
         timers[index].remaining = timers[index].duration; timers[index].deadline = nil; timers[index].completed = false
         persist(); schedule()
     }
-    func remove(id: UUID) { timers.removeAll { $0.id == id }; persist(); schedule() }
+    func focus(id: UUID?) {
+        guard id == nil || timers.contains(where: { $0.id == id }) else { return }
+        focusedTaskID = id
+        if let id { defaults.set(id.uuidString, forKey: Self.focusedTaskKey) }
+        else { defaults.removeObject(forKey: Self.focusedTaskKey) }
+    }
+    func finish(id: UUID) {
+        guard let index = timers.firstIndex(where: { $0.id == id }) else { return }
+        timers[index].remaining = 0; timers[index].deadline = nil; timers[index].completed = true
+        persist(); schedule()
+    }
+    func remove(id: UUID) {
+        timers.removeAll { $0.id == id }
+        if focusedTaskID == id { focus(id: nil) }
+        persist(); schedule()
+    }
     func tick(now: Date = Date()) {
         var completed = false
         var updated = timers

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 final class HubState: ObservableObject {
     @Published var sections = SectionVisibility.all
@@ -15,6 +16,7 @@ final class HubState: ObservableObject {
     @Published var panelOpacity: Double = 1
     @Published var previewOpacity: Double = 1
     @Published var collapsedHeight: CGFloat = 33
+    @Published var capsuleTask: HubTimer?
     @Published var topOffset: CGFloat = 0
     @Published var triggerWidth: CGFloat = 177
     @Published var previewClip: Clip?
@@ -107,7 +109,10 @@ final class PanelController {
     private var escapeMonitor: Any?
     private var triggerArmed = true
     private var hoverCheckPending = false
-    init(store: HubStore, clock: FocusClock, state: HubState, screen: NSScreen, layout: HubLayoutPreferences = .standard) {
+    private var taskObservation: AnyCancellable?
+    private var refreshTask: (() -> Void)?
+    private var baseIslandHeight: CGFloat = 33
+    init(store: HubStore, clock: FocusClock, state: HubState, screen: NSScreen, layout: HubLayoutPreferences = .standard, timers: TimerLibrary? = nil) {
         self.state = state
         self.screen = screen
         self.layout = layout
@@ -121,6 +126,24 @@ final class PanelController {
         let hosting = NSHostingView(rootView: HubView(store: store, clock: clock, state: state))
         hosting.sizingOptions = []
         panel.contentView = hosting
+        if let timers {
+            let update: ([HubTimer], UUID?, HubPreferencesValue) -> Void = { [weak self] items, selected, preferences in
+                guard let self else { return }
+                let task = preferences.enabled.contains(.multipleTimers) && self.state.sections.isEnabled(.timer)
+                    ? items.first(where: { $0.id == selected }) : nil
+                guard self.state.capsuleTask != task else { return }
+                self.state.capsuleTask = task
+                self.state.collapsedHeight = self.baseIslandHeight + (task == nil ? 0 : 30)
+                self.resize(expanded: self.state.expanded, animate: false)
+            }
+            taskObservation = timers.$timers.combineLatest(timers.$focusedTaskID, store.preferences.$current).sink { items, selected, preferences in
+                update(items, selected, preferences)
+            }
+            refreshTask = { [weak timers, weak store] in
+                guard let timers, let store else { return }
+                update(timers.timers, timers.focusedTaskID, store.preferences.current)
+            }
+        }
         tracker.entered = { [weak state] in state?.prepareExternalSelection?() }
         tracker.changed = { [weak self] in self?.scheduleHoverCheck() }
         tracker.track(hosting)
@@ -195,6 +218,7 @@ final class PanelController {
         }
     }
     func dispose() {
+        taskObservation?.cancel(); taskObservation = nil; refreshTask = nil
         fullscreenVisibility?.stop(); fullscreenVisibility = nil
         if state.surface != nil { state.closeSurface?() }
         state.surface = nil; state.showSurface = nil; state.closeSurface = nil
@@ -215,6 +239,7 @@ final class PanelController {
     }
     func applySectionVisibility(_ visibility: SectionVisibility) {
         let routed = state.applySectionVisibility(visibility)
+        refreshTask?()
         if routed && state.surface == nil { state.showPreview?(nil) }
     }
     func contains(_ point: CGPoint) -> Bool { screen?.frame.contains(point) ?? false }
@@ -225,7 +250,9 @@ final class PanelController {
         state.hasNotch = geometry.hasNotch; state.notchHeight = geometry.notchHeight
         state.expandedWidth = geometry.panelWidth; state.panelHeight = geometry.panelHeight
         state.previewWidth = geometry.previewWidth; state.previewContentHeight = max(0, geometry.previewHeight - geometry.notchHeight)
-        state.collapsedWidth = geometry.islandWidth; state.collapsedHeight = geometry.islandHeight
+        state.collapsedWidth = geometry.islandWidth
+        baseIslandHeight = geometry.islandHeight
+        state.collapsedHeight = baseIslandHeight + (state.capsuleTask == nil ? 0 : 30)
         state.topOffset = geometry.topOffset; state.triggerWidth = geometry.triggerWidth
         state.panelOpacity = layout.panelOpacity; state.previewOpacity = layout.previewOpacity
         resize(expanded: state.expanded, animate: false)
@@ -385,7 +412,27 @@ struct HubView: View {
             }
         }
         .overlay(alignment: .top) {
-            if !state.expanded && !state.hasNotch {
+            if !state.expanded, let task = state.capsuleTask {
+                VStack(spacing: 3) {
+                    HStack(spacing: 5) {
+                        Image(systemName: task.completed ? "checkmark.circle.fill" : (task.running ? "timer" : "pause.fill"))
+                            .foregroundStyle(task.completed ? Color.green : accent)
+                        Text(task.title).lineLimit(1).truncationMode(.tail)
+                        Spacer(minLength: 2)
+                        Text(task.completed ? "Готово" : task.label).monospacedDigit()
+                    }.font(.system(size: 10, weight: .medium))
+                    ProgressView(value: max(0, min(1, 1 - task.remaining / task.duration)))
+                        .tint(task.completed ? .green : accent).scaleEffect(y: 0.6)
+                }
+                .padding(.horizontal, 10)
+                .frame(width: state.collapsedWidth, height: 30)
+                .padding(.top, state.collapsedHeight - 30)
+                .contentShape(Rectangle())
+                .onTapGesture { state.runCommand?(.openTimers, nil) }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Задача: \(task.title), \(task.completed ? "завершена" : task.label)")
+                .help("Открыть задачу · пауза, завершение и смена задачи внутри панели")
+            } else if !state.expanded && !state.hasNotch {
                 Image(systemName: store.archive.clips.isEmpty ? "doc.on.clipboard" : "doc.on.clipboard.fill")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(store.archive.clips.isEmpty ? Color.white.opacity(0.4) : accent)
@@ -474,6 +521,7 @@ struct HubView: View {
         case .transformText: return "Преобразовать текст\nИзмени раскладку или регистр выбранного текста, отформатируй JSON или очисти ссылку."
         case .detachPreview: return "Отдельный предпросмотр\nОткрой выбранный элемент в отдельном окне, которое останется доступно после сворачивания панели."
         case .recognizeImage: return "Распознать изображение\nИзвлеки текст из выбранной картинки. Распознавание выполняется на Mac."
+        case .recognizeTable: return "Скриншот → таблица\nРаспознай строки и столбцы, проверь ячейки и скопируй таблицу для Excel или Numbers."
         case .batchCopy: return "Копировать выбранное\nВыбери несколько элементов, затем объедини тексты или скопируй файлы вместе."
         case .openWorkspaces: return "Рабочие наборы\nПереключай наборы с отдельными полкой и заметкой или создай новый набор."
         case .openScreenshots: return "История скриншотов\nОткрой сохранённый фрагмент экрана и продолжи редактирование."
@@ -520,6 +568,18 @@ struct HubView: View {
     }
     private var content: some View {
         VStack(spacing: 3) {
+            if state.surface == nil, state.previewClip == nil, let task = state.capsuleTask {
+                Button { state.runCommand?(.openTimers, nil) } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: task.completed ? "checkmark.circle.fill" : "timer")
+                        Text(task.title).lineLimit(1)
+                        Spacer(minLength: 2)
+                        Text(task.completed ? "Готово" : task.label).monospacedDigit()
+                        Image(systemName: "chevron.right")
+                    }.font(.system(size: 10)).padding(.horizontal, 6).padding(.vertical, 3)
+                }.buttonStyle(.plain).foregroundStyle(accent)
+                    .help("Открыть выбранную задачу")
+            }
             Group {
                 if let surface = state.surface {
                     VStack(spacing: 4) {
@@ -750,7 +810,10 @@ struct HubView: View {
         if preferences.isEnabled(.favorites) { Button(store.isFavorite(clip) ? "Убрать из избранного" : "В избранное") { store.toggleFavorite(clip) } }
         if preferences.isEnabled(.textTools), clip.text != nil { Button("Преобразовать текст…") { state.runCommand?(.transformText, clip) } }
         if preferences.isEnabled(.detachedPreview) { Button("Открыть предпросмотр") { state.runCommand?(.detachPreview, clip) } }
-        if preferences.isEnabled(.imageOCR), clip.kind == .image { Button("Распознать текст…") { state.runCommand?(.recognizeImage, clip) } }
+        if preferences.isEnabled(.imageOCR), clip.kind == .image {
+            Button("Распознать текст…") { state.runCommand?(.recognizeImage, clip) }
+            Button("Скриншот → таблица…") { state.runCommand?(.recognizeTable, clip) }
+        }
         if preferences.isEnabled(.sharing) { Button("Передать / поделиться…") { state.runCommand?(.share, clip) } }
         if preferences.isEnabled(.workspaces) {
             Menu("В рабочий набор") {

@@ -37,12 +37,12 @@ enum HubFeature: String, CaseIterable, Codable, Identifiable {
         case .favorites: return "Закрепляй нужные элементы в истории"
         case .textTools: return "Меняй регистр, раскладку и формат текста, создавай UUID"
         case .detachedPreview: return "Открывай содержимое в расширенной панели челки"
-        case .imageOCR: return "Распознавай текст локально на Mac"
+        case .imageOCR: return "Распознавай текст и таблицы локально на Mac"
         case .batchActions: return "Выбирай и копируй несколько элементов"
         case .privacy: return "Приостанавливай захват и исключай приложения"
         case .workspaces: return "Сохраняй наборы заметок и файлов"
         case .screenshotHistory: return "Возвращайся к сохранённым снимкам"
-        case .multipleTimers: return "Запускай отдельные таймеры для задач"
+        case .multipleTimers: return "Запускай таймеры и закрепляй задачу в живой капсуле"
         case .sharing: return "Передавай буфер ссылкой или через AirDrop, создавай QR"
         }
     }

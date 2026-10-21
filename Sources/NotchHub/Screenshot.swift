@@ -92,6 +92,7 @@ final class ScreenshotEditor: NSObject, ObservableObject {
     var close: (() -> Void)?
     var changed: (() -> Void)?
     var recognizedText: ((String) -> Void)?
+    var recognizeTable: ((CGImage) -> Void)?
     private var recognitionGeneration = UUID()
     var shortcuts = EditorShortcutSettings.shared
     var archiveID: UUID?
@@ -193,7 +194,7 @@ final class ScreenshotEditor: NSObject, ObservableObject {
             }
         }
     }
-    func cancelRecognition() { recognitionGeneration = UUID(); recognizing = false; recognizedText = nil }
+    func cancelRecognition() { recognitionGeneration = UUID(); recognizing = false; recognizedText = nil; recognizeTable = nil }
 }
 struct RecognizedScreenshotText: View {
     @State var text: String
@@ -280,7 +281,7 @@ final class ScreenshotCanvas: NSView {
         guard editor.valid else { return }
         let r=editor.selection
         let w: CGFloat=28, h: CGFloat=168
-        let aw: CGFloat=174, ah: CGFloat=28
+        let aw: CGFloat=198, ah: CGFloat=28
         let actionsBelow=r.maxY+ah+12 <= bounds.height
         let ax=min(max(6,r.maxX-aw),max(6,bounds.width-aw-6))
         let ay=actionsBelow ? r.maxY+6 : max(6,r.maxY-ah-6)
@@ -419,6 +420,9 @@ struct ScreenshotActions: View {
             Button { editor.recognizeText() } label: {
                 Image(systemName:editor.recognizing ? "hourglass" : "text.viewfinder").frame(width:22,height:20)
             }.help(editor.message ?? "Распознать текст").accessibilityLabel("Распознать текст").disabled(editor.recognizing)
+            Button { if let image = editor.exportedImage(annotated: true) { editor.recognizeTable?(image) } } label: {
+                Image(systemName: "tablecells").frame(width: 22, height: 20)
+            }.help("Распознать таблицу").accessibilityLabel("Распознать таблицу").disabled(!editor.valid || editor.recognizing || editor.recognizeTable == nil)
             Button { save() } label: { Image(systemName:"square.and.arrow.down").frame(width:22,height:20) }
                 .help("Сохранить · " + EditorShortcutSettings.shared.shortcut(.save).label).accessibilityLabel("Сохранить скриншот")
             Button { editor.copyScreenshot() } label: { Image(systemName:"doc.on.doc").frame(width:22,height:20) }
@@ -458,6 +462,8 @@ final class ScreenshotController {
     private var editors: [ScreenshotEditor]=[]
     var archiveEditor: ((ScreenshotEditor) -> Void)?
     var recognizedText: ((String) -> Void)?
+    var recognizeTable: ((CGImage) -> Void)?
+    var canRecognizeTable: () -> Bool = { true }
     var editorShortcuts = EditorShortcutSettings.shared
     private var reopenedObserver: NSObjectProtocol?
     private var escapeMonitor: Any?
@@ -511,6 +517,7 @@ final class ScreenshotController {
                         guard let self else { return }
                         self.finish(); self.recognizedText?(text)
                     }
+                    configureTableRecognition(editor)
                     editor.close = { [weak self] in self?.finish() }; editors.append(editor)
                     let window=ScreenshotWindow(contentRect:screen.frame,styleMask:.borderless,backing:.buffered,defer:false)
                     window.title="NotchHub — скриншот"
@@ -533,6 +540,7 @@ final class ScreenshotController {
         if active { finish() }
         active = true
         editor.recognizedText = { [weak self] text in self?.finish(); self?.recognizedText?(text) }
+        configureTableRecognition(editor)
         editor.close = { [weak self] in self?.finish() }
         editors = [editor]
         let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? CGRect(x: 0, y: 0, width: 900, height: 700)
@@ -553,6 +561,14 @@ final class ScreenshotController {
         }
         window.center(); NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil); window.makeFirstResponder(canvas)
+    }
+    func configureTableRecognition(_ editor: ScreenshotEditor) {
+        editor.recognizeTable = nil
+        guard canRecognizeTable(), recognizeTable != nil else { return }
+        editor.recognizeTable = { [weak self] image in
+            guard let self, self.canRecognizeTable(), let callback = self.recognizeTable else { return }
+            self.finish(); callback(image)
+        }
     }
     func finish() {
         guard active || captureTask != nil else { return }

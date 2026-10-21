@@ -124,7 +124,13 @@ class TransferStore:
             self.cleanup()
 
 
-LANDING = '''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>NotchHub</title><style>body{font:17px system-ui;max-width:36rem;margin:12vh auto;padding:24px;background:#12141b;color:#fff}a{display:inline-block;background:#457aff;color:white;padding:14px 20px;border-radius:14px;text-decoration:none}p{line-height:1.6;color:#c9cdd8}</style><h1>NotchHub</h1><p>Откройте ссылку в NotchHub на Mac. Приложение расшифрует элементы локально и предложит добавить их в историю.</p><a id="open">Открыть в NotchHub</a><p>Передача доступна один час. Нужна установленная версия NotchHub с поддержкой передачи.</p><script>document.getElementById('open').href='notchhub://receive?url='+encodeURIComponent(location.href);</script></html>'''.encode('utf-8')
+# Static receiver has no third-party code. The URL fragment is never sent here.
+WEB_ROOT = Path(__file__).resolve().parent
+LANDING = (WEB_ROOT / "receiver.html").read_bytes()
+WEB_ASSETS = {
+    "/receiver.js": ((WEB_ROOT / "receiver.js").read_bytes(), "text/javascript; charset=utf-8"),
+    "/receiver.css": ((WEB_ROOT / "receiver.css").read_bytes(), "text/css; charset=utf-8"),
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -146,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
         self.send_header("Connection", "close")
         self.end_headers()
         if body:
@@ -196,16 +202,17 @@ class Handler(BaseHTTPRequestHandler):
             store.release(size)
 
     def do_GET(self):
+        if self.path in WEB_ASSETS:
+            body, content_type = WEB_ASSETS[self.path]
+            return self.reply(200, body, content_type)
         if self.path == "/health":
             return self.reply(200, b'{"ok":true}')
         if self.path.startswith("/s/"):
             token = self.path[3:]
             if not TOKEN.fullmatch(token):
                 return self.reply(404)
-            opened = self.server.store.open(token)
-            if opened is None:
-                return self.reply(404)
-            self.server.store.finish_read(token, opened[0])
+            # Render the receiver even after expiry; its explicit fetch shows a
+            # useful expiration message instead of an empty HTTP error page.
             return self.reply(200, LANDING, "text/html; charset=utf-8")
         if not self.path.startswith("/transfers/"):
             return self.reply(404)

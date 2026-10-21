@@ -9,7 +9,7 @@ struct TransferSettingsView: View {
     var body: some View {
         SettingsCard {
             VStack(alignment: .leading, spacing: 14) {
-                SettingsHeading(title: "Передача между Mac", icon: "arrow.left.arrow.right")
+                SettingsHeading(title: "Передача по ссылке", icon: "arrow.left.arrow.right")
                 Text("Элементы шифруются на Mac. Сервер хранит передачу один час; ключ расшифровки находится только в ссылке.")
                     .font(.caption).foregroundStyle(.secondary)
                 TextField("HTTPS-адрес сервера", text: $endpoint).textFieldStyle(.roundedBorder)
@@ -122,7 +122,7 @@ struct TransferWindowView: View {
         SettingsCard {
             VStack(alignment: .leading, spacing: 12) {
                 SettingsHeading(title: "Отправить выбранное", icon: "tray.and.arrow.up")
-                Text("До 20 элементов, 30 МБ на элемент и 60 МБ на передачу. AirDrop отправляет одну ссылку для импорта в NotchHub.")
+                Text("До 20 элементов, 30 МБ на элемент и 60 МБ на передачу. Получатель может скачать элементы в браузере без установки приложения или принять их в NotchHub. Приём в браузере требует сервера с поддержкой этой функции.")
                     .font(.caption).foregroundStyle(.secondary)
                 if store.archive.clips.isEmpty { Text("История пока пуста").foregroundStyle(.secondary) }
                 ForEach(store.archive.clips) { clip in
@@ -144,7 +144,7 @@ struct TransferWindowView: View {
                 }
                 if let link = service.shareURL {
                     Divider()
-                    Text("Передача готова · 1 час").font(.system(size: 12, weight: .medium))
+                    Text("Передача готова · браузер или NotchHub · 1 час").font(.system(size: 12, weight: .medium))
                     HStack {
                         Button("Скопировать ссылку") { service.copyLink() }
                         Button("AirDrop…") { service.airDrop() }

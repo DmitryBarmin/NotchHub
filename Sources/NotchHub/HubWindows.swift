@@ -53,28 +53,47 @@ struct TextToolsView: View {
     @State private var error: String?
     @State private var editor: NSTextView?
     @State private var externalApplied = false
+    @State private var original: FormattingSnapshot?
     private func convert(_ transform: TextTransform) {
         do {
+            let snapshot = FormattingSnapshot(text: input, selection: selection)
             if let externalSelection {
                 let result = try transform.apply(to: input)
+                guard result.utf8.count <= HubStore.maxBytes else { throw ClipActionFailure("Результат превышает 30 МБ") }
                 try externalSelection.replace(with: result)
+                if original == nil, result != input { original = snapshot }
                 input = result; showFormats = false; externalApplied = true
                 error = "Текст изменён в исходном приложении"
             } else if let editor {
                 let range = selection.length > 0 ? selection : NSRange(location: 0, length: (input as NSString).length)
                 let replacement = try TextSelectionTransform.apply(transform, to: input, range: range)
-                guard editor.shouldChangeText(in: range, replacementString: replacement.text) else { return }
-                editor.textStorage?.replaceCharacters(in: range, with: replacement.text)
-                editor.didChangeText(); editor.setSelectedRange(replacement.selection)
+                let unchangedBytes = input.utf8.count - (input as NSString).substring(with: range).utf8.count
+                guard replacement.text.utf8.count <= HubStore.maxBytes - unchangedBytes else { throw ClipActionFailure("Результат превышает 30 МБ") }
+                guard SelectionTextEditor.replace(in: editor, range: range, text: replacement.text, selection: replacement.selection) else { return }
+                if original == nil, editor.string != snapshot.text { original = snapshot }
                 editor.window?.makeFirstResponder(editor)
                 showFormats = false; error = nil
             }
         } catch { self.error = error.localizedDescription }
     }
+    private func restoreOriginal() {
+        guard let original else { return }
+        if externalApplied {
+            // The old AX selection is invalid after replacement. Never write through it again.
+            externalSelection = nil; externalApplied = false
+            input = original.text; selection = original.selection
+            notice = "Исходный текст восстановлен здесь. Скопируй его для использования в другом приложении."
+        } else if let editor {
+            guard SelectionTextEditor.replace(in: editor, range: NSRange(location: 0, length: editor.string.utf16.count), text: original.text, selection: original.selection) else { return }
+            editor.window?.makeFirstResponder(editor)
+        } else { input = original.text; selection = original.selection }
+        showFormats = false; error = nil
+    }
     private func importClipboard() {
         do {
             input = try readClipboard?(false) ?? store.textForFormatting(automatic: false, from: .general)
-            externalSelection = nil; externalApplied = false; error = nil
+            externalSelection = nil; externalApplied = false; original = nil; error = nil
+            editor?.undoManager?.removeAllActions()
             selection = NSRange(location: 0, length: 0)
             editor?.setSelectedRange(selection)
             notice = "Текст из буфера — результат можно скопировать"
@@ -82,9 +101,15 @@ struct TextToolsView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text(externalSelection == nil ? "Выдели текст и выбери формат" : "Формат применяется к выделению в исходном приложении").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text(externalSelection == nil ? "Выдели текст и выбери формат" : "Формат применяется к выделению в исходном приложении").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                Button { editor?.undoManager?.undo(); editor?.window?.makeFirstResponder(editor) } label: { Image(systemName: "arrow.uturn.backward") }
+                    .help("Отменить изменение (⌘Z)").accessibilityLabel("Отменить изменение").disabled(externalApplied || editor?.undoManager?.canUndo != true)
+                Button { editor?.undoManager?.redo(); editor?.window?.makeFirstResponder(editor) } label: { Image(systemName: "arrow.uturn.forward") }
+                    .help("Повторить изменение (⇧⌘Z)").accessibilityLabel("Повторить изменение").disabled(externalApplied || editor?.undoManager?.canRedo != true)
+                Button("Исходный", action: restoreOriginal).help("Вернуть точный текст до первого преобразования")
+                    .disabled(original == nil || original?.text == input)
                 Button("Из буфера", action: importClipboard).help("Прочитать текущий текст из буфера")
                 Button { showFormats.toggle() } label: { Label("Формат", systemImage: "textformat") }
                     .disabled(externalApplied || input.isEmpty)
@@ -128,6 +153,12 @@ struct SelectionTextEditor: NSViewRepresentable {
     @Binding var selection: NSRange
     @Binding var editor: NSTextView?
     var editable = true
+    @discardableResult static func replace(in editor: NSTextView, range: NSRange, text: String, selection: NSRange) -> Bool {
+        guard editor.shouldChangeText(in: range, replacementString: text) else { return false }
+        editor.textStorage?.replaceCharacters(in: range, with: text)
+        editor.didChangeText(); editor.setSelectedRange(selection)
+        return true
+    }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -163,18 +194,84 @@ struct SelectionTextEditor: NSViewRepresentable {
 struct TemplatesView: View {
     @ObservedObject var store: HubStore
     let edit: (TextTemplate?) -> Void
+    @State private var filling: TextTemplate?
+    @State private var error: String?
+    private func use(_ template: TextTemplate) {
+        do {
+            let fields = try TemplateFields(template.text)
+            if fields.names.isEmpty { copy(try fields.render(values: [:])) }
+            else { filling = template; error = nil }
+        } catch { self.error = error.localizedDescription }
+    }
+    private func copy(_ text: String) {
+        if store.addText(text), let clip = store.archive.clips.first { store.copy(clip); error = nil }
+        else { error = store.message ?? "Не удалось скопировать шаблон" }
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("Постоянные тексты и команды").foregroundStyle(.secondary); Spacer(); Button("Новый шаблон") { edit(nil) }.buttonStyle(.borderedProminent) }
-            if store.archive.templates.isEmpty { ContentUnavailableView("Шаблонов пока нет", systemImage: "text.badge.plus", description: Text("Сохрани часто используемый ответ, команду или ссылку.")) }
-            else { List(store.archive.templates) { template in
-                HStack { VStack(alignment: .leading) { Text(template.title).fontWeight(.medium); Text(template.text).lineLimit(2).font(.caption).foregroundStyle(.secondary) }; Spacer()
-                    Button { if store.addText(template.text), let clip = store.archive.clips.first { store.copy(clip) } } label: { Image(systemName: "doc.on.doc") }.help("Копировать шаблон")
-                    Button { edit(template) } label: { Image(systemName: "pencil") }.help("Изменить")
-                    Button(role: .destructive) { store.removeTemplate(template) } label: { Image(systemName: "trash") }.help("Удалить шаблон")
-                }.padding(.vertical, 4).buttonStyle(.borderless).accessibilityElement(children: .contain)
-            } }
-        }.padding(20)
+        VStack(alignment: .leading, spacing: 12) {
+            if let filling {
+                TemplateFillView(store: store, template: filling) { self.filling = nil }
+            } else {
+                HStack { Text("Постоянные тексты и команды").foregroundStyle(.secondary); Spacer(); Button("Новый шаблон") { edit(nil) }.buttonStyle(.borderedProminent) }
+                if let error { Text(error).font(.caption).foregroundStyle(.red) }
+                if store.archive.templates.isEmpty { ContentUnavailableView("Шаблонов пока нет", systemImage: "text.badge.plus", description: Text("Сохрани часто используемый ответ, команду или ссылку. Для полей используй {{Имя}}.")) }
+                else { List(store.archive.templates) { template in
+                    HStack { VStack(alignment: .leading) { Text(template.title).fontWeight(.medium); Text(template.text).lineLimit(2).font(.caption).foregroundStyle(.secondary) }; Spacer()
+                        Button { use(template) } label: { Image(systemName: "doc.on.doc") }.help("Заполнить поля и скопировать шаблон")
+                        Button { edit(template) } label: { Image(systemName: "pencil") }.help("Изменить")
+                        Button(role: .destructive) { store.removeTemplate(template) } label: { Image(systemName: "trash") }.help("Удалить шаблон")
+                    }.padding(.vertical, 4).buttonStyle(.borderless).accessibilityElement(children: .contain)
+                } }
+            }
+        }.padding(16)
+    }
+}
+
+struct TemplateFillView: View {
+    @ObservedObject var store: HubStore
+    let template: TextTemplate
+    let finished: () -> Void
+    @State private var values: [String: String] = [:]
+    @State private var error: String?
+    @State private var copied = false
+    private var fields: TemplateFields? { try? TemplateFields(template.text) }
+    private var output: String { (try? fields?.render(values: values, requireValues: false)) ?? "" }
+    private var ready: Bool { (try? fields?.render(values: values)) != nil }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button { finished() } label: { Label("Шаблоны", systemImage: "chevron.left") }
+                Text(template.title).font(.headline).lineLimit(1)
+                Spacer()
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(fields?.names ?? [], id: \.self) { name in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(name).font(.caption).foregroundStyle(.secondary)
+                            TextField(name, text: Binding(get: { values[name] ?? "" }, set: { values[name] = $0; copied = false; error = nil })).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    Text("Предпросмотр").font(.caption).foregroundStyle(.secondary)
+                    Text(output.isEmpty ? "Заполни поля, чтобы увидеть результат" : output)
+                        .font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                }.padding(.trailing, 4)
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Text(copied ? "Скопировано" : "Поля обрабатываются на Mac").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Копировать результат") {
+                    do {
+                        let text = try TemplateFields(template.text).render(values: values)
+                        guard store.addText(text), let clip = store.archive.clips.first else { throw ClipActionFailure(store.message ?? "Не удалось скопировать результат") }
+                        store.copy(clip); copied = true; error = nil
+                    } catch { self.error = error.localizedDescription }
+                }.buttonStyle(.borderedProminent).disabled(!ready)
+            }
+        }
     }
 }
 
@@ -212,17 +309,27 @@ struct TemplateEditorView: View {
         self.store = store; self.template = template; self.finished = finished
         _title = State(initialValue: template?.title ?? ""); _text = State(initialValue: template?.text ?? "")
     }
+    private var parsingError: String? {
+        do { _ = try TemplateFields(text); return nil } catch { return error.localizedDescription }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("Название", text: $title).textFieldStyle(.roundedBorder)
             TextEditor(text: $text).font(.system(.body, design: .monospaced))
+            Text("Поле: {{Имя}} · повторные поля заполняются один раз · \\{{ для буквальных скобок")
+                .font(.caption).foregroundStyle(.secondary)
+            if let fields = try? TemplateFields(text), !fields.names.isEmpty {
+                Text("Поля: " + fields.names.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            } else if let parsingError {
+                Text(parsingError).font(.caption).foregroundStyle(.red)
+            }
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack { Text("Шаблоны не вытесняются историей").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Сохранить") {
                 let saved: Bool
                 if var item = template { item.title = title; item.text = text; saved = store.updateTemplate(item) }
                 else { saved = store.addTemplate(title: title, text: text) }
                 if saved { finished() } else { error = store.message ?? "Не удалось сохранить шаблон" }
-            }.buttonStyle(.borderedProminent).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text.isEmpty || text.utf8.count > HubStore.maxBytes) }
+            }.buttonStyle(.borderedProminent).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text.isEmpty || text.utf8.count > HubStore.maxBytes || parsingError != nil) }
         }.padding(20)
     }
 }
@@ -247,20 +354,30 @@ struct TimerLibraryView: View {
     @State private var title = ""
     @State private var minutes = 25
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { TextField("Название таймера", text: $title); TextField("Минуты", value: $minutes, format: .number).frame(width: 65); Text("мин").foregroundStyle(.secondary); Button("Добавить") { library.add(title: title, minutes: minutes); title = "" }.disabled(minutes < 1 || minutes > 10080) }.textFieldStyle(.roundedBorder)
-            if library.timers.isEmpty { ContentUnavailableView("Нет таймеров", systemImage: "timer", description: Text("Дедлайны сохраняются при закрытии приложения.")) }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { TextField("Задача или таймер", text: $title); TextField("Минуты", value: $minutes, format: .number).frame(width: 65); Text("мин").foregroundStyle(.secondary); Button("Добавить") { library.add(title: title, minutes: minutes); title = "" }.disabled(minutes < 1 || minutes > 10080) }.textFieldStyle(.roundedBorder)
+            if library.timers.isEmpty { ContentUnavailableView("Нет задач и таймеров", systemImage: "timer", description: Text("Создай задачу и закрепи её в капсуле. Дедлайн сохраняется после перезапуска.")) }
             else { List(library.timers) { timer in
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading) { Text(timer.title).fontWeight(.medium); ProgressView(value: max(0, min(timer.duration, timer.remaining)), total: timer.duration).frame(maxWidth: 200) }
-                    Spacer(); Text(timer.label).monospacedDigit().font(.title2).foregroundStyle(timer.completed ? Color.green : Color.primary)
-                    Button { if timer.running { library.pause(id: timer.id) } else { library.start(id: timer.id) } } label: { Image(systemName: timer.running ? "pause.fill" : "play.fill") }.disabled(timer.remaining == 0).help(timer.running ? "Пауза" : "Начать")
-                    Button { library.reset(id: timer.id) } label: { Image(systemName: "arrow.counterclockwise") }.help("Сбросить")
-                    Button(role: .destructive) { library.remove(id: timer.id) } label: { Image(systemName: "trash") }.help("Удалить таймер")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Text(timer.title).fontWeight(.medium).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(timer.label).monospacedDigit().font(.title2).foregroundStyle(timer.completed ? Color.green : Color.primary)
+                    }
+                    ProgressView(value: max(0, min(timer.duration, timer.duration - timer.remaining)), total: timer.duration)
+                    HStack(spacing: 12) {
+                        Button { library.focus(id: library.focusedTaskID == timer.id ? nil : timer.id) } label: {
+                            Label(library.focusedTaskID == timer.id ? "Убрать из капсулы" : "В капсулу", systemImage: library.focusedTaskID == timer.id ? "pin.slash" : "pin")
+                        }.help("Показывать эту задачу в свёрнутой чёлке")
+                        Spacer()
+                        Button { if timer.running { library.pause(id: timer.id) } else { library.start(id: timer.id) } } label: { Image(systemName: timer.running ? "pause.fill" : "play.fill") }.disabled(timer.remaining == 0).help(timer.running ? "Пауза" : "Начать")
+                        Button { library.finish(id: timer.id) } label: { Image(systemName: "checkmark.circle") }.disabled(timer.completed).help("Завершить задачу")
+                        Button { library.reset(id: timer.id) } label: { Image(systemName: "arrow.counterclockwise") }.help("Сбросить")
+                        Button(role: .destructive) { library.remove(id: timer.id) } label: { Image(systemName: "trash") }.help("Удалить таймер")
+                    }
                 }.padding(.vertical, 6).buttonStyle(.borderless).accessibilityElement(children: .contain)
             } }
-            Text("Отсчёт сохраняется после перезапуска приложения").font(.caption).foregroundStyle(.secondary)
-        }.padding(20)
+            Text("Закреплённая задача видна в капсуле · отсчёт сохраняется после перезапуска").font(.caption).foregroundStyle(.secondary)
+        }.padding(16)
     }
 }
 

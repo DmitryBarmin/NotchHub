@@ -351,7 +351,7 @@ private final class TransferRequest: NSObject, URLSessionDataDelegate, @unchecke
                 var link = URLComponents(url: endpoint.appendingPathComponent("s").appendingPathComponent(created.id), resolvingAgainstBaseURL: false)!
                 link.fragment = TransferCodec.keyString(prepared.1)
                 shareURL = link.url
-                message = "Готово: \(clips.count) отдельных элементов. Ссылка действует один час."
+                message = "Готово: \(clips.count) отдельных элементов. Получатель откроет ссылку в браузере или NotchHub. Ссылка действует один час."
             } catch { if generation == token { message = "Не удалось отправить: \(error.localizedDescription)" } }
         }
     }

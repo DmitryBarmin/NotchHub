@@ -61,17 +61,34 @@ class ServerTests(unittest.TestCase):
         status, body, headers = self.request("GET", "/s/" + token, authorized=False)
         self.assertEqual(status, 200)
         self.assertNotIn(b"encrypted-example", body)
-        self.assertIn(b"encodeURIComponent(location.href)", body)
+        self.assertIn(b'src="/receiver.js"', body)
+        self.assertNotIn(b"<script>", body)
+        self.assertIn("connect-src 'self'", headers["Content-Security-Policy"])
+        self.assertNotIn("unsafe-inline", headers["Content-Security-Policy"])
         self.assertEqual(headers["Cache-Control"], "no-store")
         for _ in range(2):
             status, body, headers = self.request("GET", "/transfers/" + token, authorized=False)
             self.assertEqual((status, body), (200, b"encrypted-example"))
             self.assertEqual(headers["Content-Type"], "application/octet-stream")
 
+    def test_browser_assets_are_local_uncached_and_do_not_require_credentials(self):
+        for path, content_type in [("/receiver.js", "text/javascript"), ("/receiver.css", "text/css")]:
+            status, body, headers = self.request("GET", path, authorized=False)
+            self.assertEqual(status, 200)
+            self.assertTrue(headers["Content-Type"].startswith(content_type))
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertTrue(body)
+        script = self.request("GET", "/receiver.js", authorized=False)[1]
+        self.assertIn(b"encodeURIComponent(location.href)", script)
+        self.assertNotIn(b"innerHTML", script)
+        self.assertIn(b"credentials: 'omit'", script)
+        self.assertEqual(self.request("GET", "/receiver.js?key=x")[0], 404)
+
     def test_expiry_removes_blob_and_metadata_and_releases_quota(self):
         token = self.upload()
         self.now[0] += 11
         self.assertEqual(self.request("GET", "/transfers/" + token)[0], 404)
+        self.assertEqual(self.request("GET", "/s/" + token)[0], 200)
         self.assertFalse((Path(self.directory.name) / (token + ".blob")).exists())
         self.assertFalse((Path(self.directory.name) / (token + ".json")).exists())
         self.upload(b"new")

@@ -35,6 +35,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     let externalSelection = ExternalSelectionCoordinator()
     let detached = DetachedPreviewController()
     let imageOCR = ImageOCRController()
+    let tableOCR = TableOCRController()
     let quickShare = QuickShareController()
     var transfer: ClipboardTransfer!
     private var preferencesObserver: AnyCancellable?
@@ -65,6 +66,8 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             guard let self, self.preferences.isEnabled(.imageOCR) else { return }
             self.showRecognizedText(text)
         }
+        screenshotController.recognizeTable = { [weak self] image in self?.showTable(image: image) }
+        screenshotController.canRecognizeTable = { [weak self] in self?.preferences.isEnabled(.imageOCR) == true }
         windows.present = { [weak self] surface in
             guard let self else { return }
             if let surface { self.currentController?.state.showSurface?(surface) }
@@ -98,7 +101,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         preferencesObserver = preferences.$current.dropFirst().receive(on: RunLoop.main).sink { [weak self] value in
             guard let self else { return }
             if !value.enabled.contains(.detachedPreview) { self.detached.closeAll() }
-            if !value.enabled.contains(.imageOCR) { self.imageOCR.cancel(); self.windows.close("ocr") }
+            if !value.enabled.contains(.imageOCR) { self.imageOCR.cancel(); self.tableOCR.cancel(); self.windows.close("ocr"); self.windows.close("tableOCR") }
             if !value.enabled.contains(.multipleTimers) { self.timerLibrary.pauseAll(); self.windows.close("timers") }
             if !value.enabled.contains(.sharing) { self.quickShare.closeAll(); self.windows.close("share"); self.windows.close("transfer"); self.transfer.cancel() }
             if !value.enabled.contains(.screenshotHistory) { self.windows.close("screenshots") }
@@ -117,6 +120,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         item("Сделать скриншот", action: #selector(takeScreenshot), menu: menu)
         item("Избранное и шаблоны…", action: #selector(showFavorites), menu: menu)
         item("История скриншотов…", action: #selector(showScreenshots), menu: menu)
+        item("Скриншот → таблица…", action: #selector(showTableOCR), menu: menu)
         item("Таймеры…", action: #selector(showTimers), menu: menu)
         item("Генератор UUID…", action: #selector(showUUIDGenerator), menu: menu)
         item("Передать буфер…", action: #selector(showTransfer), menu: menu)
@@ -154,7 +158,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             state.runCommand = { [weak self] command, clip in self?.perform(command, clip: clip) }
             state.closeSurface = { [weak self] in self?.windows.closeAll() }
             state.editWorkspace = { [weak self] id in self?.editWorkspace(id) }
-            return PanelController(store: store, clock: clock, state: state, screen: $0, layout: layoutSettings?.current ?? .standard)
+            return PanelController(store: store, clock: clock, state: state, screen: $0, layout: layoutSettings?.current ?? .standard, timers: timerLibrary)
         }
     }
     func applySectionVisibility(_ visibility: SectionVisibility) {
@@ -221,6 +225,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         item("Сделать скриншот", action: #selector(takeScreenshot), menu: appMenu)
         item("Избранное и шаблоны…", action: #selector(showFavorites), menu: appMenu)
         item("История скриншотов…", action: #selector(showScreenshots), menu: appMenu)
+        item("Скриншот → таблица…", action: #selector(showTableOCR), menu: appMenu)
         item("Таймеры…", action: #selector(showTimers), menu: appMenu)
         item("Генератор UUID…", action: #selector(showUUIDGenerator), menu: appMenu)
         item("Передать буфер…", action: #selector(showTransfer), menu: appMenu)
@@ -237,7 +242,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         editItem.submenu = editMenu; main.addItem(editItem); NSApp.mainMenu = main
     }
     func menuWillOpen(_ menu: NSMenu) {
-        let features: [(Selector, HubFeature)] = [(#selector(showUUIDGenerator), .textTools), (#selector(showFavorites), .favorites), (#selector(showScreenshots), .screenshotHistory), (#selector(showTimers), .multipleTimers), (#selector(showTransfer), .sharing)]
+        let features: [(Selector, HubFeature)] = [(#selector(showUUIDGenerator), .textTools), (#selector(showTableOCR), .imageOCR), (#selector(showFavorites), .favorites), (#selector(showScreenshots), .screenshotHistory), (#selector(showTimers), .multipleTimers), (#selector(showTransfer), .sharing)]
         for item in menu.items {
             if let feature = features.first(where: { item.action == $0.0 })?.1 { item.isHidden = !preferences.isEnabled(feature) }
         }
@@ -317,6 +322,9 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
                     self.windows.show("ocr", title: "Распознавание текста") { Text(error.localizedDescription).padding(20) }
                 }
             }
+        case .recognizeTable:
+            guard let clip, clip.kind == .image, let url = store.assetURL(clip) else { store.message = "Выбери изображение таблицы в буфере или сделай скриншот"; return }
+            showTable(url: url)
         case .batchCopy:
             let clips = selectedBatch()
             if clips.isEmpty {
@@ -330,6 +338,21 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     }
     func showRecognizedText(_ text: String) {
         windows.show("ocr", title: "Распознанный текст") { TextToolsView(store: store, input: text) }
+    }
+    func showTable(url: URL) {
+        guard preferences.isEnabled(.imageOCR) else { return }
+        windows.show("tableOCR", title: "Скриншот → таблица", onClose: { [weak self] in self?.tableOCR.cancel() }) {
+            TableOCRView(controller: tableOCR, store: store)
+        }
+        tableOCR.recognize(url: url)
+    }
+    @objc func showTableOCR() { perform(.recognizeTable) }
+    func showTable(image: CGImage) {
+        guard preferences.isEnabled(.imageOCR) else { return }
+        windows.show("tableOCR", title: "Скриншот → таблица", onClose: { [weak self] in self?.tableOCR.cancel() }) {
+            TableOCRView(controller: tableOCR, store: store)
+        }
+        tableOCR.recognize(image: image)
     }
     @objc func showUUIDGenerator() {
         guard preferences.isEnabled(.textTools) else { return }
@@ -358,6 +381,9 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
                 let editor = try self.screenshotLibrary.editor(for: entry)
                 editor.shortcuts = self.editorSettings
                 editor.recognizedText = { [weak self] text in self?.showRecognizedText(text) }
+                if self.preferences.isEnabled(.imageOCR) {
+                    editor.recognizeTable = { [weak self] image in self?.showTable(image: image) }
+                }
                 editor.close = { [weak self] in self?.windows.close("screenshotEditor") }
                 self.windows.show("screenshotEditor", title: "Редактировать скриншот", onClose: { [weak self, weak editor] in
                     guard let self, let editor else { return }
