@@ -44,6 +44,8 @@ struct HubGeometry {
     let panelHeight: CGFloat
     let previewWidth: CGFloat
     let previewHeight: CGFloat
+    let settingsWidth: CGFloat
+    let settingsHeight: CGFloat
     let islandWidth: CGFloat
     let islandHeight: CGFloat
     let topOffset: CGFloat
@@ -66,6 +68,9 @@ struct HubGeometry {
                     panelHeight: height(preferences.panelHeight == 0 ? defaultPanelHeight : preferences.panelHeight, minimum: notchHeight + 70),
                     previewWidth: width(preferences.previewWidth, minimum: minimumPanelWidth),
                     previewHeight: height(preferences.previewHeight == 0 ? notchHeight + 400 : preferences.previewHeight, minimum: notchHeight + 100),
+                    // Recovery controls must remain usable even when the saved preview is tiny.
+                    settingsWidth: width(preferences.previewWidth, minimum: max(680, minimumPanelWidth)),
+                    settingsHeight: height(preferences.previewHeight == 0 ? notchHeight + 448 : preferences.previewHeight, minimum: 480),
                     islandWidth: islandWidth,
                     islandHeight: height(preferences.islandHeight == 0 ? (hasNotch ? notchHeight + 1 : 16) : preferences.islandHeight, minimum: hasNotch ? notchHeight + 1 : 1),
                     topOffset: topOffset, triggerWidth: max(1, min(islandWidth, hasNotch ? hardwareWidth : 104) - 2))
@@ -147,9 +152,15 @@ struct LayoutSettingsView: View {
             SettingsCard {
                 VStack(alignment: .leading, spacing: 13) {
                     SettingsHeading(title: "Островок", icon: "capsule.inset.filled")
-                    HStack(alignment: .top, spacing: 20) {
-                        slider("Ширина", key: \.islandWidth, range: 80...400, effective: geometry.islandWidth, automatic: true)
-                        slider("Высота", key: \.islandHeight, range: 10...100, effective: geometry.islandHeight, automatic: true)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 20) {
+                            slider("Ширина", key: \.islandWidth, range: 80...400, effective: geometry.islandWidth, automatic: true).frame(minWidth: 140)
+                            slider("Высота", key: \.islandHeight, range: 10...100, effective: geometry.islandHeight, automatic: true).frame(minWidth: 140)
+                        }
+                        VStack(spacing: 13) {
+                            slider("Ширина", key: \.islandWidth, range: 80...400, effective: geometry.islandWidth, automatic: true)
+                            slider("Высота", key: \.islandHeight, range: 10...100, effective: geometry.islandHeight, automatic: true)
+                        }
                     }
                     slider("Смещение вниз", key: \.verticalOffset, range: -40...120, effective: geometry.topOffset)
                 }

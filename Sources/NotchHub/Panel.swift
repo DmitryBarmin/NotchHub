@@ -22,12 +22,17 @@ final class HubState: ObservableObject {
     @Published var previewClip: Clip?
     @Published var previewWidth: CGFloat = 680
     @Published var previewContentHeight: CGFloat = 400
+    @Published var settingsWidth: CGFloat = 680
+    @Published var settingsContentHeight: CGFloat = 448
     @Published var surface: HubSurface?
     var closeSurface: (() -> Void)?
     var showSurface: ((HubSurface?) -> Void)?
     var hasPreview: Bool { previewClip != nil || surface != nil }
-    var panelWidth: CGFloat { hasPreview ? previewWidth : expandedWidth }
-    var expandedHeight: CGFloat { !hasPreview ? (sections.isEmpty ? min(panelHeight, notchHeight + 70) : panelHeight) : notchHeight + previewContentHeight }
+    var panelWidth: CGFloat { surface?.key == "settings" ? settingsWidth : (hasPreview ? previewWidth : expandedWidth) }
+    var expandedHeight: CGFloat {
+        if surface?.key == "settings" { return notchHeight + settingsContentHeight }
+        return !hasPreview ? (sections.isEmpty ? min(panelHeight, notchHeight + 70) : panelHeight) : notchHeight + previewContentHeight
+    }
     @Published var hasNotch = true
     @Published var tab = 0
     @Published var keyboardSelecting = false
@@ -250,6 +255,7 @@ final class PanelController {
         state.hasNotch = geometry.hasNotch; state.notchHeight = geometry.notchHeight
         state.expandedWidth = geometry.panelWidth; state.panelHeight = geometry.panelHeight
         state.previewWidth = geometry.previewWidth; state.previewContentHeight = max(0, geometry.previewHeight - geometry.notchHeight)
+        state.settingsWidth = geometry.settingsWidth; state.settingsContentHeight = max(0, geometry.settingsHeight - geometry.notchHeight)
         state.collapsedWidth = geometry.islandWidth
         baseIslandHeight = geometry.islandHeight
         state.collapsedHeight = baseIslandHeight + (state.capsuleTask == nil ? 0 : 30)

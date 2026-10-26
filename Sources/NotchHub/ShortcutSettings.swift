@@ -117,24 +117,46 @@ struct ShortcutSettingsView: View {
     private func modifier(_ flag: UInt32) -> Binding<Bool> {
         Binding(get: { draft.modifiers & flag != 0 }, set: { if $0 { draft.modifiers |= flag } else { draft.modifiers &= ~flag } })
     }
+    private static let pages = ["Общие", "Возможности", "Хранилище", "Размеры", "Клавиши", "Передача", "Обновления"]
     var body: some View {
-        NavigationSplitView {
-            VStack(alignment: .leading, spacing: 14) {
-                Label("NotchHub", systemImage: "capsule.inset.filled").font(.title2.weight(.semibold)).padding(.horizontal, 16).padding(.top, 20)
-                List(selection: $page) {
-                    Label("Общие", systemImage: "square.grid.2x2").tag(0)
-                    Label("Возможности", systemImage: "switch.2").tag(1)
-                    Label("Хранилище", systemImage: "internaldrive").tag(2)
-                    Label("Размеры", systemImage: "arrow.up.left.and.arrow.down.right").tag(3)
-                    Label("Клавиши", systemImage: "keyboard").tag(4)
-                    Label("Передача", systemImage: "paperplane").tag(5)
-                    Label("Обновления", systemImage: "arrow.triangle.2.circlepath").tag(6)
-                }.listStyle(.sidebar)
-            }.navigationSplitViewColumnWidth(min: 165, ideal: 180, max: 200)
-        } detail: {
+        GeometryReader { geometry in
+            if geometry.size.width >= 640 {
+                NavigationSplitView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Label("NotchHub", systemImage: "capsule.inset.filled").font(.title2.weight(.semibold)).padding(.horizontal, 16).padding(.top, 20)
+                        List(selection: $page) {
+                            Label("Общие", systemImage: "square.grid.2x2").tag(0)
+                            Label("Возможности", systemImage: "switch.2").tag(1)
+                            Label("Хранилище", systemImage: "internaldrive").tag(2)
+                            Label("Размеры", systemImage: "arrow.up.left.and.arrow.down.right").tag(3)
+                            Label("Клавиши", systemImage: "keyboard").tag(4)
+                            Label("Передача", systemImage: "paperplane").tag(5)
+                            Label("Обновления", systemImage: "arrow.triangle.2.circlepath").tag(6)
+                        }.listStyle(.sidebar)
+                    }.navigationSplitViewColumnWidth(min: 165, ideal: 180, max: 200)
+                } detail: { detail(compact: false) }
+            } else {
+                VStack(spacing: 0) {
+                    Picker("Раздел настроек", selection: Binding(get: { page ?? 0 }, set: { page = $0 })) {
+                        ForEach(Self.pages.indices, id: \.self) { index in Text(Self.pages[index]).tag(index) }
+                    }.pickerStyle(.menu).padding(.horizontal, 12).padding(.top, 10)
+                    detail(compact: true)
+                }
+            }
+        }
+        .onChange(of: settings.current) { _, value in draft = value }
+    }
+    private func detail(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(pageTitle).font(.system(size: compact ? 19 : 23, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                Button("Сбросить размеры") { layout.reset() }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .help("Вернуть стандартные размеры и прозрачность; остальные настройки сохраняются")
+            }.padding(.horizontal, compact ? 12 : 24).padding(.vertical, 12)
+            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text(pageTitle).font(.system(size: 23, weight: .semibold))
                     switch page ?? 0 {
                     case 0:
                         sectionsCard
@@ -153,10 +175,10 @@ struct ShortcutSettingsView: View {
                         if let correctionConsent { TextCorrectionSettingsCard(settings: transferSettings, consent: correctionConsent) }
                     default: updatesCard
                     }
-                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
-            }.background(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing))
-        }
-        .onChange(of: settings.current) { _, value in draft = value }
+                }.padding(compact ? 12 : 24).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing))
     }
     private var pageTitle: String { ["Общие", "Возможности", "Хранилище и приватность", "Размеры и стекло", "Горячие клавиши", "Передача буфера", "Обновления"][min(6, max(0, page ?? 0))] }
     private var updatesCard: some View {
