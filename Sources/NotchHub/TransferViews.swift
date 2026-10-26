@@ -26,6 +26,32 @@ struct TransferSettingsView: View {
     }
 }
 
+/// Explains that proofreading reuses the gateway address and key, independent of the sharing toggle.
+struct TextCorrectionSettingsCard: View {
+    @ObservedObject var settings: TransferSettings
+    @ObservedObject var consent: TextCorrectionConsent
+    private var status: String {
+        guard let endpoint = settings.endpointURL else { return "Словарь macOS исправляет орфографию локально. Для полной правки задай адрес сервера." }
+        let auth = settings.uploadKey.isEmpty ? "Ключ отправки не сохранён — полная правка недоступна." : "Ключ отправки сохранён."
+        let agreement: String
+        if consent.isGranted(for: endpoint) { agreement = "Согласие на отправку текста дано для \(endpoint.host ?? endpoint.absoluteString)." }
+        else if consent.origin == nil { agreement = "Согласие на отправку ещё не дано — вопрос появится при первом нажатии." }
+        else { agreement = "Согласие дано для другого сервера — при первом нажатии вопрос появится снова." }
+        return auth + " " + agreement
+    }
+    var body: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsHeading(title: "Исправление ошибок", icon: "text.badge.checkmark")
+                Text("Кнопка «Исправить ошибки» использует словарь macOS и не отправляет текст. Отдельная кнопка «Полная правка…» отправляет только выбранный текст на этот сервер по адресу и ключу отправки; перед первой отправкой потребуется согласие. Включать «Передачу и QR» не нужно. Полную правку выполняет модель OpenAI через серверный Hermes; ключ OpenAI хранится только на сервере.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                if consent.origin != nil { Button("Отозвать согласие") { consent.revoke() }.controlSize(.small) }
+            }
+        }
+    }
+}
+
 struct TransferWindowView: View {
     @ObservedObject var service: ClipboardTransfer
     @ObservedObject var store: HubStore

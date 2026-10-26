@@ -103,11 +103,12 @@ struct ShortcutSettingsView: View {
     @ObservedObject var commands: CommandShortcuts
     @ObservedObject var transferSettings: TransferSettings
     @ObservedObject var editorSettings: EditorShortcutSettings
+    var correctionConsent: TextCorrectionConsent?
     @State private var draft: ClipboardShortcut
     @State private var page: Int? = 0
-    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings, updater: AppUpdater, preferences: HubPreferences, commands: CommandShortcuts, transferSettings: TransferSettings, editorSettings: EditorShortcutSettings) {
+    init(settings: ShortcutSettings, sections: SectionSettings, layout: LayoutSettings, screenshots: ScreenshotSettings, previews: ScreenshotSettings, updater: AppUpdater, preferences: HubPreferences, commands: CommandShortcuts, transferSettings: TransferSettings, editorSettings: EditorShortcutSettings, correctionConsent: TextCorrectionConsent? = nil) {
         self.preferences = preferences; self.commands = commands; self.transferSettings = transferSettings
-        self.editorSettings = editorSettings
+        self.editorSettings = editorSettings; self.correctionConsent = correctionConsent
         self.updater = updater
         self.previews = previews
         self.screenshots = screenshots
@@ -147,7 +148,9 @@ struct ShortcutSettingsView: View {
                         ScreenshotShortcutCard(settings: screenshots)
                         CommandShortcutsView(settings: commands)
                         EditorShortcutCard(settings: editorSettings)
-                    case 5: TransferSettingsView(settings: transferSettings)
+                    case 5:
+                        TransferSettingsView(settings: transferSettings)
+                        if let correctionConsent { TextCorrectionSettingsCard(settings: transferSettings, consent: correctionConsent) }
                     default: updatesCard
                     }
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
@@ -223,7 +226,7 @@ struct ShortcutSettingsView: View {
                 ForEach(HubCommand.allCases) { command in
                     Toggle(isOn: Binding(get: { sections.current.pinnedCommands.contains(command) }, set: { sections.setCommand(command, enabled: $0) })) {
                         HStack(spacing: 10) {
-                            Image(systemName: command.feature?.icon ?? "bolt").frame(width: 22).foregroundStyle(.blue)
+                            Image(systemName: command.icon).frame(width: 22).foregroundStyle(.blue)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(command == .openFavorites ? "Избранное и шаблоны" : command.title).font(.system(size: 13, weight: .medium))
                                 if let feature = command.feature, !preferences.isEnabled(feature) {

@@ -48,6 +48,7 @@ struct TextToolsView: View {
     @State var externalSelection: ExternalTextSelection?
     @State var notice = ""
     var readClipboard: ((Bool) throws -> String)?
+    var correction: TextCorrectionController?
     @State private var selection = NSRange(location: 0, length: 0)
     @State private var showFormats = false
     @State private var error: String?
@@ -99,6 +100,21 @@ struct TextToolsView: View {
             notice = "Текст из буфера — результат можно скопировать"
         } catch { self.error = error.localizedDescription }
     }
+    /// Explicit replacement of the whole editor text; native undo keeps the exact source.
+    private func insertCorrection(_ corrected: String) -> Bool {
+        guard externalSelection == nil, let editor else { return false }
+        let snapshot = FormattingSnapshot(text: input, selection: selection)
+        guard SelectionTextEditor.replace(in: editor, range: NSRange(location: 0, length: editor.string.utf16.count), text: corrected, selection: NSRange(location: 0, length: 0)) else { return false }
+        if original == nil, corrected != snapshot.text { original = snapshot }
+        editor.window?.makeFirstResponder(editor)
+        showFormats = false; error = nil
+        return true
+    }
+    /// Automatic application only when the editor still holds exactly the text that was sent.
+    private func applyCorrection(requested: String, corrected: String) -> Bool {
+        guard externalSelection == nil, let editor, input == requested, editor.string == requested else { return false }
+        return insertCorrection(corrected)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(externalSelection == nil ? "Выдели текст и выбери формат" : "Формат применяется к выделению в исходном приложении").font(.caption).foregroundStyle(.secondary)
@@ -135,9 +151,12 @@ struct TextToolsView: View {
                 .frame(maxWidth: .infinity, minHeight: 80, maxHeight: .infinity)
                 .layoutPriority(1)
                 .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            if let correction {
+                TextCorrectionSection(controller: correction, text: input, canApply: externalSelection == nil && editor != nil, apply: applyCorrection, insert: insertCorrection)
+            }
             if let error { Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             HStack {
-                Text("Обработка на Mac").font(.caption).foregroundStyle(.secondary)
+                Text(correction == nil ? "Обработка на Mac" : "Орфография — на Mac · пунктуация и грамматика — «Полная правка…»").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Копировать текст") {
                     guard input.utf8.count <= HubStore.maxBytes else { error = "Текст превышает 30 МБ"; return }
@@ -145,6 +164,63 @@ struct TextToolsView: View {
                 }.disabled(input.isEmpty)
             }
         }.padding(12)
+    }
+}
+
+/// Local spelling and explicitly requested server proofreading stay inside the text tools panel.
+struct TextCorrectionSection: View {
+    @ObservedObject var controller: TextCorrectionController
+    let text: String
+    let canApply: Bool
+    let apply: (_ requested: String, _ corrected: String) -> Bool
+    let insert: (String) -> Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    let requested = text
+                    controller.correctLocally(text: requested) { apply(requested, $0.text) }
+                } label: { Label("Исправить ошибки", systemImage: HubCommand.correctText.icon) }
+                    .help("Исправить орфографию словарём macOS. Текст остаётся на этом Mac.")
+                    .disabled(controller.busy || controller.pendingConsent != nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button {
+                    let requested = text
+                    controller.request(text: requested) { apply(requested, $0.text) }
+                } label: { Label("Полная правка…", systemImage: "text.badge.checkmark") }
+                    .help("Отправить текст на свой сервер для исправления пунктуации и грамматики. Перед первой отправкой появится подтверждение.")
+                    .disabled(controller.busy || controller.pendingConsent != nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if controller.busy {
+                    ProgressView().controlSize(.small)
+                    Button("Отменить") { controller.cancel() }.controlSize(.small)
+                }
+            }
+            Text("Орфография: словарь macOS · Полная правка: \(controller.host)")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if let notice = controller.pendingConsent {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(notice).font(.caption).fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Отмена") { controller.declineConsent() }
+                        Button("Отправить") { controller.confirmConsent() }.buttonStyle(.borderedProminent)
+                    }.controlSize(.small)
+                }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            }
+            if let message = controller.message { Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if let result = controller.result, result.text != text {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(result.text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).lineLimit(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack {
+                        if let provider = result.provider { Text(provider).font(.caption).foregroundStyle(.secondary) }
+                        else if let model = result.model { Text("Модель: \(model)").font(.caption).foregroundStyle(.secondary) }
+                        Spacer()
+                        if canApply { Button("Заменить в редакторе") { _ = insert(result.text) } }
+                        Button(controller.copied ? "Скопировано" : "Копировать исправление") { controller.copyResult() }
+                        Button { controller.clearResult() } label: { Image(systemName: "xmark") }.help("Скрыть исправление").accessibilityLabel("Скрыть исправление")
+                    }.controlSize(.small)
+                }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
     }
 }
 
@@ -290,7 +366,7 @@ struct FavoritesLibraryView: View {
                     Image(systemName: clip.kind == .text ? "text.alignleft" : "photo").foregroundStyle(.blue)
                     VStack(alignment: .leading) { Text(clip.title).lineLimit(2); if let text = clip.text { Text(text).font(.caption).lineLimit(2).foregroundStyle(.secondary) } }
                     Spacer(); Button { store.copy(clip) } label: { Image(systemName: "doc.on.doc") }.help("Копировать")
-                    if store.preferences.isEnabled(.detachedPreview) { Button { action(.detachPreview, clip) } label: { Image(systemName: "macwindow") }.help("Предпросмотр") }
+                    if store.preferences.isEnabled(.detachedPreview) { Button { action(.detachPreview, clip) } label: { Image(systemName: HubCommand.detachPreview.icon) }.help("Предпросмотр") }
                     Button { store.toggleFavorite(clip) } label: { Image(systemName: "star.slash") }.help("Убрать из избранного")
                 }.padding(.vertical, 5).buttonStyle(.borderless).accessibilityElement(children: .contain)
             } }

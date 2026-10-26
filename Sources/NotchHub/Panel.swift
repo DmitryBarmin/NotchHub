@@ -487,7 +487,7 @@ struct HubView: View {
                 if state.sections.isEnabled(.clipboard) { tab("Буфер", icon: "doc.on.clipboard", index: 0) }
                 if state.sections.isEnabled(.shelf) { tab("Полка", icon: "tray", index: 1) }
                 if state.sections.isEnabled(.note) { tab("Заметка", icon: "square.and.pencil", index: 2) }
-                if state.sections.isEnabled(.timer) { tab("Фокус", icon: "timer", index: 3) }
+                if state.sections.isEnabled(.timer) { tab("Фокус", icon: HubSection.timer.icon, index: 3) }
                 if !railCommands.isEmpty {
                     Rectangle().fill(Color.white.opacity(0.14)).frame(width: 16, height: 1).padding(.vertical, 3)
                     ForEach(railCommands) { command in railAction(command) }
@@ -519,6 +519,7 @@ struct HubView: View {
         case .openFavorites: return "Избранное и шаблоны\nОткрой закреплённые элементы и часто используемые тексты."
         case .generateUUID: return "Генератор UUID\nСоздавай UUID v4 по одному или списком до 100, копируй выбранный UUID или весь список."
         case .transformText: return "Преобразовать текст\nИзмени раскладку или регистр выбранного текста, отформатируй JSON или очисти ссылку."
+        case .correctText: return "Исправить ошибки\nИсправь орфографию словарём macOS без сети. Для пунктуации и грамматики выбери «Полная правка…» и подтверди отправку на свой сервер."
         case .detachPreview: return "Отдельный предпросмотр\nОткрой выбранный элемент в отдельном окне, которое останется доступно после сворачивания панели."
         case .recognizeImage: return "Распознать изображение\nИзвлеки текст из выбранной картинки. Распознавание выполняется на Mac."
         case .recognizeTable: return "Скриншот → таблица\nРаспознай строки и столбцы, проверь ячейки и скопируй таблицу для Excel или Numbers."
@@ -532,7 +533,7 @@ struct HubView: View {
         }
     }
     private func railIcon(_ command: HubCommand) -> some View {
-        Image(systemName: command == .toggleCapture ? (store.paused ? "play.circle" : "pause.circle") : (command == .generateUUID ? "number" : command.feature?.icon ?? "bolt"))
+        Image(systemName: command == .toggleCapture && store.paused ? "play.circle" : command.icon)
             .font(.system(size: 11)).frame(width: 24, height: 22)
             .foregroundStyle(command == .toggleCapture && store.paused ? Color.orange : Color.white.opacity(0.7))
             .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
@@ -791,13 +792,13 @@ struct HubView: View {
         }
     }
     private var workspaceSelector: some View {
-        Menu { workspaceOptions } label: { HStack { Image(systemName: "square.stack"); Text(store.archive.workspaces.first { $0.id == store.archive.activeWorkspaceID }?.name ?? "Общая полка").lineLimit(1); Spacer(); Image(systemName: "chevron.down") }.font(.system(size: 10)) }.menuStyle(.borderlessButton).menuIndicator(.hidden).padding(.horizontal, 4)
+        Menu { workspaceOptions } label: { HStack { Image(systemName: HubCommand.openWorkspaces.icon); Text(store.archive.workspaces.first { $0.id == store.archive.activeWorkspaceID }?.name ?? "Общая полка").lineLimit(1); Spacer(); Image(systemName: "chevron.down") }.font(.system(size: 10)) }.menuStyle(.borderlessButton).menuIndicator(.hidden).padding(.horizontal, 4)
     }
     private var batchBar: some View {
         let selected = itemSource.filter { state.batchIDs.contains($0.id) }
         return HStack(spacing: 8) {
             Text("\(selected.count) выбрано").font(.system(size: 10))
-            Button { _ = store.copyBatch(selected) } label: { Image(systemName: "doc.on.doc") }.help("Копировать выбранное").disabled(selected.isEmpty)
+            Button { _ = store.copyBatch(selected) } label: { Image(systemName: HubCommand.batchCopy.icon) }.help("Копировать выбранное").disabled(selected.isEmpty)
             BatchDragHandle(clips: selected, store: store).frame(width: 70, height: 18)
             if preferences.isEnabled(.sharing) { Button { state.runCommand?(.share, nil) } label: { Image(systemName: "paperplane") }.help("Передать выбранное").disabled(selected.isEmpty) }
             Spacer(); Button { state.batchMode = false; state.batchIDs = [] } label: { Image(systemName: "xmark") }.help("Завершить выбор")
@@ -808,13 +809,16 @@ struct HubView: View {
     }
     @ViewBuilder private func clipActionButtons(_ clip: Clip) -> some View {
         if preferences.isEnabled(.favorites) { Button(store.isFavorite(clip) ? "Убрать из избранного" : "В избранное") { store.toggleFavorite(clip) } }
-        if preferences.isEnabled(.textTools), clip.text != nil { Button("Преобразовать текст…") { state.runCommand?(.transformText, clip) } }
-        if preferences.isEnabled(.detachedPreview) { Button("Открыть предпросмотр") { state.runCommand?(.detachPreview, clip) } }
-        if preferences.isEnabled(.imageOCR), clip.kind == .image {
-            Button("Распознать текст…") { state.runCommand?(.recognizeImage, clip) }
-            Button("Скриншот → таблица…") { state.runCommand?(.recognizeTable, clip) }
+        if preferences.isEnabled(.textTools), clip.text != nil {
+            Button { state.runCommand?(.transformText, clip) } label: { Label("Преобразовать текст…", systemImage: HubCommand.transformText.icon) }
+            Button { state.runCommand?(.correctText, clip) } label: { Label("Исправить ошибки…", systemImage: HubCommand.correctText.icon) }
         }
-        if preferences.isEnabled(.sharing) { Button("Передать / поделиться…") { state.runCommand?(.share, clip) } }
+        if preferences.isEnabled(.detachedPreview) { Button { state.runCommand?(.detachPreview, clip) } label: { Label("Открыть предпросмотр", systemImage: HubCommand.detachPreview.icon) } }
+        if preferences.isEnabled(.imageOCR), clip.kind == .image {
+            Button { state.runCommand?(.recognizeImage, clip) } label: { Label("Распознать текст…", systemImage: HubCommand.recognizeImage.icon) }
+            Button { state.runCommand?(.recognizeTable, clip) } label: { Label("Скриншот → таблица…", systemImage: HubCommand.recognizeTable.icon) }
+        }
+        if preferences.isEnabled(.sharing) { Button { state.runCommand?(.share, clip) } label: { Label("Передать / поделиться…", systemImage: HubCommand.share.icon) } }
         if preferences.isEnabled(.workspaces) {
             Menu("В рабочий набор") {
                 Button("Общая полка") { store.moveToWorkspace(clip, id: nil) }

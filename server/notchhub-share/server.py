@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import signal
 import socket
 import ssl
@@ -16,6 +17,8 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from correction import CorrectionCancelled, CorrectionError, CorrectionService, MAX_BODY, TIMEOUT
 
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 MAX_REQUEST = 90 * 1024 * 1024
@@ -160,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def do_POST(self):
-        if self.path != "/transfers":
+        if self.path not in ("/transfers", "/correct"):
             return self.reply(404)
         authorization = self.headers.get("Authorization", "").encode()
         expected = ("Bearer " + self.server.upload_key).encode()
@@ -170,6 +173,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or len(lengths[0]) > 10 or not lengths[0].isdigit():
             return self.reply(411)
         size = int(lengths[0])
+        if self.path == "/correct":
+            return self.correct_text(size)
         if size <= 0 or size > self.server.max_request:
             return self.reply(413)
         store = self.server.store
@@ -200,6 +205,59 @@ class Handler(BaseHTTPRequestHandler):
             if temporary is not None:
                 Path(temporary).unlink(missing_ok=True)
             store.release(size)
+
+    def correct_text(self, size):
+        if size <= 0 or size > MAX_BODY:
+            return self.reply(413, b'{"error":"Text is too long (maximum 6000 characters)."}')
+        if self.headers.get_content_type() != "application/json":
+            return self.reply(415, b'{"error":"Use application/json."}')
+        # Headers, body and worker share an absolute budget below the 30s watchdog.
+        with self.server.deadline_lock:
+            deadline = self.server.deadlines.get(self.connection, time.monotonic() + TIMEOUT)
+        deadline = min(deadline - 5, time.monotonic() + TIMEOUT)
+        timer = threading.Timer(max(0, deadline - time.monotonic()), self.server.expire_request, args=(self.connection,))
+        timer.daemon = True
+        timer.start()
+        try:
+            self.connection.settimeout(max(0.01, deadline - time.monotonic()))
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError("Truncated body")
+            data = json.loads(raw)
+            if not isinstance(data, dict) or set(data) != {"text"}:
+                raise ValueError("Invalid request")
+            remaining = deadline - time.monotonic() - 0.2
+            if remaining <= 0:
+                raise TimeoutError()
+            def cancelled():
+                if not select.select([self.connection], [], [], 0)[0]:
+                    return False
+                try:
+                    # Only this handler reads TLS. A TLS control frame can make the
+                    # FD readable without application data, hence the short timeout.
+                    self.connection.settimeout(.001)
+                    return self.connection.recv(1) == b""
+                except (socket.timeout, ssl.SSLWantReadError):
+                    return False
+                except OSError:
+                    return True
+                finally:
+                    self.connection.settimeout(max(.001, deadline - time.monotonic()))
+            result = self.server.correction.correct(data["text"], timeout=remaining, cancelled=cancelled)
+            self.reply(200, json.dumps(result, ensure_ascii=False).encode())
+        except CorrectionCancelled:
+            pass
+        except CorrectionError as error:
+            self.reply(error.status, json.dumps({"error": error.message}).encode())
+        except (ValueError, UnicodeError):
+            self.reply(400, b'{"error":"Provide a JSON object containing text."}')
+        except (OSError, TimeoutError):
+            try:
+                self.reply(408, b'{"error":"Request timed out."}')
+            except OSError:
+                pass
+        finally:
+            timer.cancel()
 
     def do_GET(self):
         if self.path in WEB_ASSETS:
@@ -332,6 +390,7 @@ def create_server(host, port, storage, upload_key, clock=time.time, max_bytes=MA
     server = TransferServer((host, port), Handler)
     server.store = TransferStore(storage, clock, max_bytes, max_transfers, ttl)
     server.upload_key, server.max_request = upload_key, max_request
+    server.correction = CorrectionService()
     return server
 
 

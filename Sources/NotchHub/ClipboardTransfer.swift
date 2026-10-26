@@ -235,9 +235,11 @@ enum TransferCodec {
     }
 }
 
-private final class TransferRequest: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+/// Shared gateway transport: bounded body, same-origin responses only, no redirects, cancellable.
+final class TransferRequest: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let limit: Int
     private let origin: URL
+    private let timeout: TimeInterval
     private var buffer = Data()
     private var response: HTTPURLResponse?
     private var failure: Error?
@@ -246,10 +248,10 @@ private final class TransferRequest: NSObject, URLSessionDataDelegate, @unchecke
     private var task: URLSessionDataTask?
     private let lock = NSLock()
     private var cancelled = false
-    init(limit: Int, origin: URL) { self.limit = limit; self.origin = origin }
-    static func perform(_ request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+    init(limit: Int, origin: URL, timeout: TimeInterval) { self.limit = limit; self.origin = origin; self.timeout = timeout }
+    static func perform(_ request: URLRequest, limit: Int, timeout: TimeInterval = 30) async throws -> (Data, HTTPURLResponse) {
         guard let origin = request.url else { throw TransferFailure("Неверный адрес сервера") }
-        let loader = TransferRequest(limit: limit, origin: origin)
+        let loader = TransferRequest(limit: limit, origin: origin, timeout: timeout)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { loader.start(request, continuation: $0) }
         } onCancel: { loader.cancel() }
@@ -259,7 +261,7 @@ private final class TransferRequest: NSObject, URLSessionDataDelegate, @unchecke
         guard !cancelled else { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
         completion = continuation
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30; config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest = timeout; config.timeoutIntervalForResource = timeout
         config.urlCache = nil; config.httpCookieStorage = nil; config.httpShouldSetCookies = false
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
         let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)

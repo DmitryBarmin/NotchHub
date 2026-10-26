@@ -21,6 +21,7 @@ final class HubStore: ObservableObject {
     @Published private(set) var archive = Archive()
     @Published var paused = false
     @Published var message: String?
+    var captureSuspended: () -> Bool = { false }
     let root: URL
     let preferences: HubPreferences
     private let frontmostApp: () -> String?
@@ -294,6 +295,7 @@ final class HubStore: ObservableObject {
         return (data, CGSize(width: width, height: height), extensionName)
     }
     private func discardExcludedTransition(to applicationID: String?) -> Bool {
+        guard !captureSuspended() else { return false }
         let previous = lastFrontmostApp
         lastFrontmostApp = applicationID
         guard previous != applicationID, preferences.isEnabled(.privacy) else { return false }
@@ -320,8 +322,12 @@ final class HubStore: ObservableObject {
         guard text.utf8.count <= Self.maxBytes else { throw ClipActionFailure("Текст в буфере превышает 30 МБ") }
         return text
     }
+    /// Only an owned clipboard restoration may be consumed; a newer user copy must remain observable.
+    func ignoreClipboardChange(_ restoredCount: Int) {
+        if pasteboard.changeCount == restoredCount { changeCount = restoredCount }
+    }
     func capture() {
-        guard writable else { return }
+        guard writable, !captureSuspended() else { return }
         let pb = pasteboard
         let foreground = frontmostApp()
         if discardExcludedTransition(to: foreground) { return }

@@ -38,6 +38,8 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     let tableOCR = TableOCRController()
     let quickShare = QuickShareController()
     var transfer: ClipboardTransfer!
+    var textCorrection: TextCorrectionController!
+    var clipboardSpelling: ClipboardSpellingShortcut!
     private var preferencesObserver: AnyCancellable?
     private var demoBoard: NSPasteboard?
     private var pendingOpenURLs: [URL] = []
@@ -59,6 +61,18 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         screenshotLibrary = ScreenshotLibrary(root: store.root.appendingPathComponent("Screenshots"))
         let transferSettings = demo ? TransferSettings(defaults: defaults, writeKey: { _, _ in throw TransferFailure("В демо ключ отправки не изменяется") }) : TransferSettings(defaults: defaults)
         transfer = ClipboardTransfer(settings: transferSettings)
+        // Proofreading shares only the gateway address and key; it never depends on the sharing feature toggle.
+        let demoTransport: TextCorrectionClient.Transport = { _, _ in throw TextCorrectionFailure("В демо текст не отправляется — сеть не используется") }
+        textCorrection = TextCorrectionController(settings: transferSettings, consent: TextCorrectionConsent(defaults: defaults), transport: demo ? demoTransport : nil,
+            copy: { [weak self] text in self?.store.copy(Clip(kind: .text, title: String(text.prefix(100)), text: text, fingerprint: "")) })
+        clipboardSpelling = ClipboardSpellingShortcut(capture: {
+            guard !demo else { throw TextCorrectionFailure("В демо внешнее выделение не изменяется") }
+            return try SpellingSelectionTarget.capture()
+        }, didRestore: { [weak self] count in self?.store.ignoreClipboardChange(count) }) { [weak self] message in
+            self?.store.message = message
+            self?.status?.button?.toolTip = "NotchHub — " + message
+        }
+        store.captureSuspended = { [weak self] in self?.clipboardSpelling?.busy == true }
         screenshotController = ScreenshotController { [weak self] in self?.configureScreens() }
         editorSettings = EditorShortcutSettings(defaults: defaults)
         screenshotController.editorShortcuts = editorSettings
@@ -97,7 +111,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             self.store.message = nil
         }
         if let error = hotKeys.error { store.message = error }
-        commands = CommandShortcuts(preferences: preferences, defaults: defaults) { [weak self] command in self?.perform(command) }
+        commands = CommandShortcuts(preferences: preferences, defaults: defaults) { [weak self] command in self?.performShortcut(command) }
         preferencesObserver = preferences.$current.dropFirst().receive(on: RunLoop.main).sink { [weak self] value in
             guard let self else { return }
             if !value.enabled.contains(.detachedPreview) { self.detached.closeAll() }
@@ -106,7 +120,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             if !value.enabled.contains(.sharing) { self.quickShare.closeAll(); self.windows.close("share"); self.windows.close("transfer"); self.transfer.cancel() }
             if !value.enabled.contains(.screenshotHistory) { self.windows.close("screenshots") }
             if !value.enabled.contains(.favorites) { self.windows.close("favorites"); self.windows.close("template") }
-            if !value.enabled.contains(.textTools) { self.windows.close("textTools"); self.windows.close("uuidGenerator") }
+            if !value.enabled.contains(.textTools) { self.windows.close("textTools"); self.windows.close("uuidGenerator"); self.textCorrection.cancel(); self.clipboardSpelling.cancel() }
             if !value.enabled.contains(.workspaces) { self.windows.close("workspace") }
         }
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -123,6 +137,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         item("Скриншот → таблица…", action: #selector(showTableOCR), menu: menu)
         item("Таймеры…", action: #selector(showTimers), menu: menu)
         item("Генератор UUID…", action: #selector(showUUIDGenerator), menu: menu)
+        item("Исправить ошибки…", action: #selector(showCorrectText), menu: menu)
         item("Передать буфер…", action: #selector(showTransfer), menu: menu)
         item("Настройки…", action: #selector(showSettings), menu: menu)
         item("Пауза / продолжить запись буфера", action: #selector(pause), menu: menu)
@@ -135,8 +150,8 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         if demo {
             if CommandLine.arguments.contains("--uuid-demo") { showUUIDGenerator() }
             else if CommandLine.arguments.contains("--format-demo") {
-                windows.show("textTools", title: "Преобразование текста") {
-                    TextToolsView(store: store, input: "Привет, NotchHub!\nВыдели часть текста и нажми «Формат».\nStraße 😀 example")
+                windows.show("textTools", title: "Преобразование текста", onClose: { [weak self] in self?.textCorrection.cancel() }) {
+                    TextToolsView(store: store, input: "Привет, NotchHub!\nВыдели часть текста и нажми «Формат».\nStraße 😀 example", correction: textCorrection)
                 }
             } else { seedDemo(); show() }
             currentController?.state.pinned = true
@@ -216,7 +231,28 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         if !controller.state.pinned { controller.collapse() }
         keyboardController = nil
     }
-    func item(_ title: String, action: Selector, menu: NSMenu, key: String = "") { let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; menu.addItem(item) }
+    func item(_ title: String, action: Selector, menu: NSMenu, key: String = "") {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        let symbol: String?
+        switch action {
+        case #selector(showFavorites): symbol = HubCommand.openFavorites.icon
+        case #selector(showScreenshots): symbol = HubCommand.openScreenshots.icon
+        case #selector(showTableOCR): symbol = HubCommand.recognizeTable.icon
+        case #selector(showTimers): symbol = HubCommand.openTimers.icon
+        case #selector(showUUIDGenerator): symbol = HubCommand.generateUUID.icon
+        case #selector(showCorrectText): symbol = HubCommand.correctText.icon
+        case #selector(showTransfer): symbol = HubCommand.share.icon
+        case #selector(takeScreenshot): symbol = "viewfinder"
+        case #selector(showSettings): symbol = "gearshape"
+        case #selector(pause): symbol = HubCommand.toggleCapture.icon
+        case #selector(storage): symbol = "folder"
+        case #selector(show): symbol = "capsule.inset.filled"
+        default: symbol = nil
+        }
+        if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title) }
+        item.target = self
+        menu.addItem(item)
+    }
     @objc func show() { currentController?.expand(); currentController?.panel.makeKeyAndOrderFront(nil) }
     func configureMainMenu() {
         let main = NSMenu()
@@ -228,6 +264,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         item("Скриншот → таблица…", action: #selector(showTableOCR), menu: appMenu)
         item("Таймеры…", action: #selector(showTimers), menu: appMenu)
         item("Генератор UUID…", action: #selector(showUUIDGenerator), menu: appMenu)
+        item("Исправить ошибки…", action: #selector(showCorrectText), menu: appMenu)
         item("Передать буфер…", action: #selector(showTransfer), menu: appMenu)
         item("Настройки…", action: #selector(showSettings), menu: appMenu, key: ",")
         appMenu.addItem(.separator())
@@ -242,7 +279,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         editItem.submenu = editMenu; main.addItem(editItem); NSApp.mainMenu = main
     }
     func menuWillOpen(_ menu: NSMenu) {
-        let features: [(Selector, HubFeature)] = [(#selector(showUUIDGenerator), .textTools), (#selector(showTableOCR), .imageOCR), (#selector(showFavorites), .favorites), (#selector(showScreenshots), .screenshotHistory), (#selector(showTimers), .multipleTimers), (#selector(showTransfer), .sharing)]
+        let features: [(Selector, HubFeature)] = [(#selector(showUUIDGenerator), .textTools), (#selector(showCorrectText), .textTools), (#selector(showTableOCR), .imageOCR), (#selector(showFavorites), .favorites), (#selector(showScreenshots), .screenshotHistory), (#selector(showTimers), .multipleTimers), (#selector(showTransfer), .sharing)]
         for item in menu.items {
             if let feature = features.first(where: { item.action == $0.0 })?.1 { item.isHidden = !preferences.isEnabled(feature) }
         }
@@ -250,7 +287,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     @objc func showSettings() {
         cancelClipboard()
         windows.show("settings", title: "Настройки NotchHub") {
-            ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings, screenshots: screenshotSettings, previews: previewSettings, updater: updater, preferences: preferences, commands: commands, transferSettings: transfer.settings, editorSettings: editorSettings)
+            ShortcutSettingsView(settings: shortcutSettings, sections: sectionSettings, layout: layoutSettings, screenshots: screenshotSettings, previews: previewSettings, updater: updater, preferences: preferences, commands: commands, transferSettings: transfer.settings, editorSettings: editorSettings, correctionConsent: textCorrection.consent)
         }
     }
     @objc func takeScreenshot() {
@@ -263,7 +300,7 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     @objc func pause() { store.paused.toggle() }
     @objc func storage() { NSWorkspace.shared.open(store.root) }
     @objc func quit() { NSApp.terminate(nil) }
-    func applicationWillTerminate(_ notification: Notification) { store?.finishImports(); transfer?.cancel(); detached.closeAll(); quickShare.closeAll(); windows.closeAll(); demoBoard?.releaseGlobally() }
+    func applicationWillTerminate(_ notification: Notification) { store?.finishImports(); transfer?.cancel(); textCorrection?.cancel(); clipboardSpelling?.cancel(); detached.closeAll(); quickShare.closeAll(); windows.closeAll(); demoBoard?.releaseGlobally() }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
 
     func selectedClip(explicit: Clip? = nil) -> Clip? {
@@ -278,6 +315,13 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         let source = state.tab == 1 ? store.activeShelf : (state.favoritesOnly ? store.archive.favorites : store.archive.clips)
         return source.filter { state.batchIDs.contains($0.id) }
     }
+    /// Global proofreading keeps focus in the source app. Menu and rail commands still open the editor.
+    func performShortcut(_ command: HubCommand) {
+        if command == .correctText {
+            guard preferences.isEnabled(.textTools) else { return }
+            clipboardSpelling.trigger()
+        } else { perform(command) }
+    }
     func perform(_ command: HubCommand, clip explicit: Clip? = nil) {
         if let feature = command.feature, !preferences.isEnabled(feature) { return }
         let clip = selectedClip(explicit: explicit)
@@ -288,19 +332,8 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
         case .generateUUID: showUUIDGenerator()
         case .openWorkspaces: windows.closeAll(); currentController?.state.showPreview?(nil); currentController?.state.tab = 1; show()
         case .toggleCapture: pause()
-        case .transformText:
-            if let text = explicit?.text {
-                windows.show("textTools", title: "Преобразование текста") { TextToolsView(store: store, input: text) }
-            } else {
-                let input = FormattingInput.resolve(external: {
-                    let selection = try externalSelection.selection()
-                    return FormattingInput(text: selection.text, externalSelection: selection.canReplace ? selection : nil,
-                        notice: selection.canReplace ? "Выделение в исходном приложении" : "Выделенный текст — результат можно скопировать")
-                }, clipboard: { try store.textForFormatting(sourceApplicationID: externalSelection.sourceApplicationID, automatic: false, from: .general) })
-                windows.show("textTools", title: "Формат текста") {
-                    TextToolsView(store: store, input: input.text, externalSelection: input.externalSelection, notice: input.notice, readClipboard: { automatic in try self.store.textForFormatting(sourceApplicationID: self.externalSelection.sourceApplicationID, automatic: automatic, from: .general) })
-                }
-            }
+        case .transformText: openTextTools(clip: explicit, title: explicit?.text == nil ? "Формат текста" : "Преобразование текста")
+        case .correctText: openTextTools(clip: explicit, title: "Исправить ошибки")
         case .detachPreview:
             guard let clip else { store.message = "Выбери элемент для предпросмотра"; return }
             currentController?.state.showPreview?(clip); show()
@@ -336,8 +369,27 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             openTransfer(clips.isEmpty ? clip.map { [$0] } ?? [] : clips)
         }
     }
+    /// Opening the tools never sends anything; proofreading starts only from its own button.
+    func openTextTools(clip explicit: Clip?, title: String) {
+        let onClose: () -> Void = { [weak self] in self?.textCorrection.cancel() }
+        if let text = explicit?.text {
+            windows.show("textTools", title: title, onClose: onClose) { TextToolsView(store: store, input: text, correction: textCorrection) }
+        } else {
+            let input = FormattingInput.resolve(external: {
+                let selection = try externalSelection.selection()
+                return FormattingInput(text: selection.text, externalSelection: selection.canReplace ? selection : nil,
+                    notice: selection.canReplace ? "Выделение в исходном приложении" : "Выделенный текст — результат можно скопировать")
+            }, clipboard: { try store.textForFormatting(sourceApplicationID: externalSelection.sourceApplicationID, automatic: false, from: .general) })
+            windows.show("textTools", title: title, onClose: onClose) {
+                TextToolsView(store: store, input: input.text, externalSelection: input.externalSelection, notice: input.notice, readClipboard: { automatic in try self.store.textForFormatting(sourceApplicationID: self.externalSelection.sourceApplicationID, automatic: automatic, from: .general) }, correction: textCorrection)
+            }
+        }
+    }
+    @objc func showCorrectText() { perform(.correctText) }
     func showRecognizedText(_ text: String) {
-        windows.show("ocr", title: "Распознанный текст") { TextToolsView(store: store, input: text) }
+        windows.show("ocr", title: "Распознанный текст", onClose: { [weak self] in self?.textCorrection.cancel() }) {
+            TextToolsView(store: store, input: text, correction: preferences.isEnabled(.textTools) ? textCorrection : nil)
+        }
     }
     func showTable(url: URL) {
         guard preferences.isEnabled(.imageOCR) else { return }

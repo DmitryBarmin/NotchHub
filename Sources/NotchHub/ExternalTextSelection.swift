@@ -8,9 +8,10 @@ struct ExternalTextSelection {
     private let element: AXUIElement
     private let application: NSRunningApplication
     private let range: CFRange?
+    private let requiresForeground: Bool
 
     enum SelectionError: LocalizedError {
-        case permissionRequired, unavailable, noSelection, readOnly, selectionChanged, replacementFailed
+        case permissionRequired, unavailable, noSelection, readOnly, protectedField, selectionChanged, replacementFailed
 
         var errorDescription: String? {
             switch self {
@@ -20,6 +21,8 @@ struct ExternalTextSelection {
                 return "Приложение не предоставляет доступ к выделенному тексту."
             case .noSelection:
                 return "Сначала выделите текст в другом приложении."
+            case .protectedField:
+                return "Защищённое поле пароля не читается и не исправляется."
             case .readOnly:
                 return "Приложение не разрешает изменять выделенный текст."
             case .selectionChanged:
@@ -30,21 +33,27 @@ struct ExternalTextSelection {
         }
     }
 
-    static func capture(application source: NSRunningApplication? = nil) throws -> ExternalTextSelection {
+    static func capture(application source: NSRunningApplication? = nil, requiresForeground: Bool = false) throws -> ExternalTextSelection {
         guard AXIsProcessTrusted() else { throw SelectionError.permissionRequired }
         guard let application = source ?? NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !application.isTerminated else { throw SelectionError.noSelection }
 
-        let focused = try SelectionAccessibility.element(in: application)
+        if requiresForeground, NSWorkspace.shared.frontmostApplication?.processIdentifier != application.processIdentifier { throw SelectionError.selectionChanged }
+        let focused = try requiresForeground ? SelectionAccessibility.focusedElement(in: application) : SelectionAccessibility.element(in: application)
         let element = focused.element
+        guard !SelectionAccessibility.isProtected(element) else { throw SelectionError.protectedField }
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success,
               pid == application.processIdentifier else { throw SelectionError.unavailable }
         let range = try? selectedRange(in: element)
+        if requiresForeground {
+            guard let range, range.location >= 0, range.length > 0 else { throw SelectionError.noSelection }
+            guard focused.provenFocus, isWritableSelection(in: element) else { throw SelectionError.readOnly }
+        }
         let text = try selectedText(in: element, range: range)
         guard !text.isEmpty, text.utf8.count <= HubStore.maxBytes else { throw SelectionError.noSelection }
-        return ExternalTextSelection(text: text, canReplace: range != nil && focused.provenFocus && isWritableSelection(in: element), element: element, application: application, range: range)
+        return ExternalTextSelection(text: text, canReplace: range != nil && focused.provenFocus && isWritableSelection(in: element), element: element, application: application, range: range, requiresForeground: requiresForeground)
     }
 
     func validate() throws {
@@ -56,11 +65,12 @@ struct ExternalTextSelection {
               AXUIElementGetPid(element, &pid) == .success,
               pid == application.processIdentifier else { throw SelectionError.selectionChanged }
         guard let foreground = NSWorkspace.shared.frontmostApplication,
-              foreground.processIdentifier == application.processIdentifier || foreground.processIdentifier == ProcessInfo.processInfo.processIdentifier else {
+              foreground.processIdentifier == application.processIdentifier || (!requiresForeground && foreground.processIdentifier == ProcessInfo.processInfo.processIdentifier) else {
             throw SelectionError.selectionChanged
         }
-        let focused = try SelectionAccessibility.element(in: application)
+        let focused = try requiresForeground ? SelectionAccessibility.focusedElement(in: application) : SelectionAccessibility.element(in: application)
         guard CFEqual(focused.element, element), !canReplace || focused.provenFocus else { throw SelectionError.selectionChanged }
+        guard !SelectionAccessibility.isProtected(element) else { throw SelectionError.protectedField }
         let currentRange = try? Self.selectedRange(in: element)
         guard currentRange?.location == range?.location, currentRange?.length == range?.length,
               try Self.selectedText(in: element, range: currentRange) == text else { throw SelectionError.selectionChanged }
@@ -205,7 +215,30 @@ enum SelectionAccessibility {
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
     }
+    static func isProtected(role: String?, subrole: String?, protectedContent: Bool) -> Bool {
+        protectedContent || [role, subrole].compactMap { $0?.lowercased() }.contains { $0.contains("secure") || $0.contains("password") }
+    }
+    static func isProtected(_ element: AXUIElement) -> Bool {
+        isProtected(role: value(element, kAXRoleAttribute) as? String,
+                    subrole: value(element, kAXSubroleAttribute) as? String,
+                    protectedContent: (value(element, "AXProtectedContent") as? Bool) == true)
+    }
+    /// Hotkeys never search cached/background selections or descendants of an unfocused control.
+    static func focusedElement(in application: NSRunningApplication) throws -> (element: AXUIElement, provenFocus: Bool) {
+        enableIfNeeded(application)
+        let app = AXUIElementCreateApplication(application.processIdentifier)
+        let focused = uiElement(value(app, kAXFocusedUIElementAttribute))
+            ?? uiElement(value(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute))
+        guard let focused else { throw ExternalTextSelection.SelectionError.unavailable }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(focused, &pid) == .success, pid == application.processIdentifier else {
+            throw ExternalTextSelection.SelectionError.selectionChanged
+        }
+        guard !isProtected(focused) else { throw ExternalTextSelection.SelectionError.protectedField }
+        return (focused, true)
+    }
     private static func hasSelection(_ element: AXUIElement) -> Bool {
+        guard !isProtected(element) else { return false }
         guard let rangeValue = value(element, kAXSelectedTextRangeAttribute), CFGetTypeID(rangeValue) == AXValueGetTypeID() else {
             return (value(element, kAXSelectedTextAttribute) as? String)?.isEmpty == false
         }

@@ -4,12 +4,29 @@ import Combine
 import SwiftUI
 
 enum HubCommand: String, CaseIterable, Codable, Identifiable {
-    case openFavorites, transformText, detachPreview, recognizeImage, recognizeTable, batchCopy, openWorkspaces, openScreenshots, openTimers, share, toggleCapture, generateUUID
+    case openFavorites, transformText, detachPreview, recognizeImage, recognizeTable, batchCopy, openWorkspaces, openScreenshots, openTimers, share, toggleCapture, generateUUID, correctText
     var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .openFavorites: return "star"
+        case .transformText: return "textformat"
+        case .detachPreview: return "eye"
+        case .recognizeImage: return "text.viewfinder"
+        case .recognizeTable: return "tablecells"
+        case .batchCopy: return "square.on.square"
+        case .openWorkspaces: return "square.stack.3d.up"
+        case .openScreenshots: return "photo.stack"
+        case .openTimers: return "timer"
+        case .share: return "paperplane"
+        case .toggleCapture: return "pause.circle"
+        case .generateUUID: return "number.square"
+        case .correctText: return "checkmark.seal"
+        }
+    }
     var feature: HubFeature? {
         switch self {
         case .openFavorites: return .favorites
-        case .transformText, .generateUUID: return .textTools
+        case .transformText, .generateUUID, .correctText: return .textTools
         case .detachPreview: return .detachedPreview
         case .recognizeImage, .recognizeTable: return .imageOCR
         case .batchCopy: return .batchActions
@@ -25,6 +42,7 @@ enum HubCommand: String, CaseIterable, Codable, Identifiable {
         case .openFavorites: return "Открыть избранное"
         case .transformText: return "Преобразовать текст"
         case .generateUUID: return "Генератор UUID"
+        case .correctText: return "Исправить ошибки"
         case .detachPreview: return "Предпросмотр в челке"
         case .recognizeImage: return "Распознать изображение"
         case .recognizeTable: return "Скриншот → таблица"
@@ -171,13 +189,17 @@ private struct CommandShortcutRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(command.title).font(.system(size: 12))
+                Label(command.title, systemImage: command.icon).font(.system(size: 12))
                 Spacer()
                 Text(settings.current[command]?.label ?? "Не назначено").font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button(editing ? "Скрыть" : "Изменить") {
                     if !editing { draft = settings.current[command] ?? draft }
                     editing.toggle()
                 }.controlSize(.small)
+            }
+            if command == .correctText {
+                Text("Выдели текст → сочетание → исправлено на месте · словарь macOS")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if editing {
                 HStack {

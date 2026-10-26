@@ -22,14 +22,14 @@ enum HubFeature: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .favorites: return "star"
         case .textTools: return "textformat"
-        case .detachedPreview: return "macwindow.on.rectangle"
+        case .detachedPreview: return "eye"
         case .imageOCR: return "text.viewfinder"
-        case .batchActions: return "checkmark.circle"
+        case .batchActions: return "square.on.square"
         case .privacy: return "hand.raised"
         case .workspaces: return "square.stack.3d.up"
         case .screenshotHistory: return "photo.stack"
         case .multipleTimers: return "timer"
-        case .sharing: return "square.and.arrow.up"
+        case .sharing: return "paperplane"
         }
     }
     var detail: String {

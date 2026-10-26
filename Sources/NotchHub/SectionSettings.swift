@@ -9,7 +9,7 @@ enum HubSection: Int, CaseIterable, Identifiable {
         case .clipboard: return "doc.on.clipboard"
         case .shelf: return "tray"
         case .note: return "square.and.pencil"
-        case .timer: return "timer"
+        case .timer: return "scope"
         }
     }
     var detail: String {
