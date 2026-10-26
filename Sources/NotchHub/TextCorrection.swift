@@ -56,6 +56,9 @@ enum LocalSpellingEngine {
         #"(?<!\w)[+-]?\d[\d.,:%/-]*(?!\w)"#
     ]
 
+    private static let protectedExpressions = protectedPatterns.map { try! NSRegularExpression(pattern: $0) }
+    private static let fenceOpening = try! NSRegularExpression(pattern: #"^ {0,3}(`{3,}|~{3,})"#)
+
     static func apply(_ issues: [LocalSpellingIssue], to source: String) -> LocalSpellingOutcome {
         let protected = protectedRanges(in: source)
         var replacements: [(NSRange, String)] = []
@@ -85,9 +88,8 @@ enum LocalSpellingEngine {
         protectedRanges(in: source).contains { NSIntersectionRange($0, range).length > 0 }
     }
 
-    private static func protectedRanges(in source: String) -> [NSRange] {
-        protectedPatterns.flatMap { pattern -> [NSRange] in
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+    static func protectedRanges(in source: String) -> [NSRange] {
+        protectedExpressions.flatMap { expression -> [NSRange] in
             return expression.matches(in: source, range: NSRange(source.startIndex..., in: source)).map(\.range)
         } + codeRanges(in: source)
     }
@@ -99,20 +101,19 @@ enum LocalSpellingEngine {
         while cursor < ns.length {
             let lineRange = ns.lineRange(for: NSRange(location: cursor, length: 0))
             let line = ns.substring(with: lineRange).trimmingCharacters(in: .newlines)
-            if let opening = try? NSRegularExpression(pattern: #"^ {0,3}(`{3,}|~{3,})"#),
-               let match = opening.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
+            if let match = fenceOpening.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                 let marker = (line as NSString).substring(with: match.range(at: 1))
                 let markerChar = marker.first!
+                let escaped = NSRegularExpression.escapedPattern(for: String(markerChar))
+                let closePattern = "^ {0,3}" + escaped + "{" + String(marker.count) + ",}[ \t]*$"
+                let close = try! NSRegularExpression(pattern: closePattern)
                 var closingCursor = NSMaxRange(lineRange)
                 var closeEnd = ns.length
                 var foundClose = false
                 while closingCursor < ns.length {
                     let candidateRange = ns.lineRange(for: NSRange(location: closingCursor, length: 0))
                     let candidate = ns.substring(with: candidateRange).trimmingCharacters(in: .newlines)
-                    let escaped = NSRegularExpression.escapedPattern(for: String(markerChar))
-                    let closePattern = "^ {0,3}" + escaped + "{" + String(marker.count) + ",}[ \\t]*$"
-                    if let close = try? NSRegularExpression(pattern: closePattern),
-                       close.firstMatch(in: candidate, range: NSRange(location: 0, length: (candidate as NSString).length)) != nil {
+                    if close.firstMatch(in: candidate, range: NSRange(location: 0, length: (candidate as NSString).length)) != nil {
                         closeEnd = NSMaxRange(candidateRange)
                         foundClose = true
                         break
@@ -185,8 +186,10 @@ enum MacSpellingCorrector {
                 }
                 let ns = source as NSString
                 let wordExpression = try! NSRegularExpression(pattern: #"[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)*"#)
+                // Parse code, links and paths once per request, rather than once per word.
+                let protected = LocalSpellingEngine.protectedRanges(in: source)
                 let words = wordExpression.matches(in: source, range: NSRange(location: 0, length: ns.length))
-                    .filter { !LocalSpellingEngine.isProtected($0.range, in: source) }
+                    .filter { word in !protected.contains { NSIntersectionRange($0, word.range).length > 0 } }
                 var issues: [LocalSpellingIssue] = []
                 for finding in words {
                     if cancellation.isCancelled {

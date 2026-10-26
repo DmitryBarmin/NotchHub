@@ -157,6 +157,9 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
             currentController?.state.pinned = true
         }
         else if CommandLine.arguments.contains("--show") { show(); currentController?.state.pinned = true }
+        if !demo, preferences.isEnabled(.textTools) {
+            DispatchQueue.main.async { SelectionPermissionAccess.request() }
+        }
         if !pendingOpenURLs.isEmpty { let urls = pendingOpenURLs; pendingOpenURLs = []; application(NSApplication.shared, open: urls) }
     }
     var currentController: PanelController? { controllers.first(where: { $0.contains(NSEvent.mouseLocation) }) ?? controllers.first }
@@ -319,6 +322,11 @@ private let notchHubUpdateConfiguration = AppUpdater.Configuration(
     func performShortcut(_ command: HubCommand) {
         if command == .correctText {
             guard preferences.isEnabled(.textTools) else { return }
+            guard SelectionPermissionAccess.granted else {
+                store.message = "Для исправления выделения разрешите NotchHub доступ в настройках macOS"
+                SelectionPermissionAccess.request()
+                return
+            }
             clipboardSpelling.trigger()
         } else { perform(command) }
     }

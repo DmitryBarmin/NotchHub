@@ -44,6 +44,7 @@ final class FullscreenVisibilityController {
     private var visible = true
     private var started = false
     private let idleDelay: TimeInterval = 2
+    private var lastInteraction: TimeInterval = -.infinity
 
     init(screen: NSScreen, shouldKeepVisible: @escaping () -> Bool, visibilityChanged: @escaping (Bool) -> Void) {
         self.screen = screen
@@ -84,6 +85,11 @@ final class FullscreenVisibilityController {
         guard started else { return }
         setVisible(true)
         guard fullscreen else { return }
+        // Mouse hardware can deliver hundreds of events a second. Resetting the
+        // idle deadline ten times a second is enough for a two-second timeout.
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastInteraction >= 0.1 else { return }
+        lastInteraction = now
         if let idleTimer { idleTimer.fireDate = Date(timeIntervalSinceNow: idleDelay) }
         else {
             let timer = Timer(timeInterval: idleDelay, repeats: false) { [weak self] _ in

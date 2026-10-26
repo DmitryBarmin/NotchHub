@@ -1,6 +1,28 @@
 import AppKit
 import ApplicationServices
 
+/// Recheck the actual OS grants after every update; a saved preference is not a grant.
+@MainActor enum SelectionPermissionAccess {
+    static var granted: Bool { AXIsProcessTrusted() && CGPreflightPostEventAccess() }
+
+    static func request() {
+        guard !granted else { return }
+        let alert = NSAlert()
+        alert.messageText = "Разрешите исправление выделенного текста"
+        alert.informativeText = "Для сочетания клавиш NotchHub нужен доступ к управлению другими приложениями. Включите NotchHub в открывшихся настройках. В новых версиях macOS раздел называется «Управление устройством и доступ к данным», в прежних — «Универсальный доступ». После включения повторите сочетание на выделенном тексте."
+        alert.addButton(withTitle: "Открыть настройки")
+        alert.addButton(withTitle: "Позже")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+
 /// A selection captured before NotchHub takes keyboard focus.
 struct ExternalTextSelection {
     let text: String

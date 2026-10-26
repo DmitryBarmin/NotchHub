@@ -210,14 +210,15 @@ final class PanelController {
         guard pointerMonitor == nil || tracksMoves != pointerMonitorTracksMoves else { return }
         if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }
         let mask = tracksMoves ? Self.pointerEvents : Self.pointerEvents.subtracting(.mouseMoved)
-        pointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in self?.checkHover() }
+        pointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in self?.scheduleHoverCheck() }
         pointerMonitorTracksMoves = tracksMoves
     }
     private func scheduleHoverCheck() {
         // Local events arrive before AppKit updates pressedMouseButtons on release.
         guard !hoverCheckPending else { return }
         hoverCheckPending = true
-        DispatchQueue.main.async { [weak self] in
+        // Coalesce high-frequency pointer events to at most 30 checks per second.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30.0) { [weak self] in
             self?.hoverCheckPending = false
             self?.checkHover()
         }
