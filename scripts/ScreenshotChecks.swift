@@ -34,6 +34,58 @@ import Carbon
   check(copied?.pixelsWide==200 && copied?.pixelsHigh==50,"automatic clipboard PNG")
   editor.selection=CGRect(x:0,y:0,width:50,height:25);editor.writeClipboard(to:board)
   check(board.data(forType:.png).flatMap(NSBitmapImageRep.init(data:))?.pixelsWide==100,"clipboard follows recrop")
+  let selectionEditor = ScreenshotEditor(image: context.makeImage()!, size: CGSize(width: 400, height: 300))
+  let canvas = ScreenshotCanvas(editor: selectionEditor, pasteboard: board)
+  let window = ScreenshotWindow(contentRect: canvas.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+  window.contentView = canvas
+  func mouse(_ type: NSEvent.EventType, _ x: CGFloat, _ y: CGFloat) -> NSEvent {
+   NSEvent.mouseEvent(with: type, location: canvas.convert(CGPoint(x: x, y: y), to: nil),
+                      modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                      context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+  }
+  func drag(_ x: CGFloat, _ y: CGFloat, to endX: CGFloat, _ endY: CGFloat) {
+   canvas.mouseDown(with: mouse(.leftMouseDown, x, y))
+   canvas.mouseDragged(with: mouse(.leftMouseDragged, endX, endY))
+   canvas.mouseUp(with: mouse(.leftMouseUp, endX, endY))
+  }
+  drag(0.5, 0.5, to: 399, 299)
+  check(selectionEditor.selection == canvas.bounds, "drag includes all four screen edges")
+  check(board.data(forType: .png).flatMap(NSBitmapImageRep.init(data:))?.size == CGSize(width: 200, height: 100),
+        "edge-to-edge drag copies the entire captured image")
+  let initial = CGRect(x: 60, y: 60, width: 200, height: 160)
+  selectionEditor.tool = .pen
+  for (x, y, dx, dy, expected) in [
+   (160.0, 60.0, 17.0, -20.0, CGRect(x: 60, y: 40, width: 200, height: 180)),
+   (160, 220, 17, 20, CGRect(x: 60, y: 60, width: 200, height: 180)),
+   (60, 140, -20, 17, CGRect(x: 40, y: 60, width: 220, height: 160)),
+   (260, 140, 20, 17, CGRect(x: 60, y: 60, width: 220, height: 160)),
+   (60, 60, -20, -20, CGRect(x: 40, y: 40, width: 220, height: 180)),
+   (260, 60, 20, -20, CGRect(x: 60, y: 40, width: 220, height: 180)),
+   (60, 220, -20, 20, CGRect(x: 40, y: 60, width: 220, height: 180)),
+   (260, 220, 20, 20, CGRect(x: 60, y: 60, width: 220, height: 180))
+  ] {
+   selectionEditor.selection = initial
+   drag(x, y, to: x + dx, y + dy)
+   check(selectionEditor.selection == expected, "resize handle at (\(x), \(y)) works with the pen selected")
+  }
+  selectionEditor.selection = initial
+  drag(265, 140, to: 399, 140)
+  check(selectionEditor.selection.maxX == 400, "resize reaches edge even when grabbed off-center")
+  for tool in [ScreenshotTool.select, .pen] {
+   selectionEditor.selection = initial
+   selectionEditor.tool = tool
+   canvas.updateTools()
+   canvas.mouseDown(with: mouse(.leftMouseDown, 15, 15))
+   canvas.mouseUp(with: mouse(.leftMouseUp, 15, 15))
+   check(selectionEditor.selection == initial && canvas.subviews.allSatisfy { !$0.isHidden },
+         "outside click preserves selection and both toolbars with \(tool.rawValue)")
+  }
+  selectionEditor.tool = .select
+  drag(390, 20, to: 360, 45)
+  check(selectionEditor.selection == CGRect(x: 360, y: 20, width: 30, height: 25), "outside drag can replace the selection")
+  let toolbars = canvas.subviews
+  check(toolbars.count == 2 && toolbars.allSatisfy { !$0.isHidden && canvas.bounds.contains($0.frame) }
+        && !toolbars[0].frame.intersects(toolbars[1].frame), "toolbars fit without overlap near the top-right corner")
   let name=UUID().uuidString;let defaults=UserDefaults(suiteName:name)!;defer { defaults.removePersistentDomain(forName:name) };var calls=0
   let settings=ScreenshotSettings(defaults:defaults,register:{_,_ in calls+=1;return calls==1 ? noErr : OSStatus(eventHotKeyExistsErr)},action:{})
   let sections=SectionSettings(defaults:defaults)

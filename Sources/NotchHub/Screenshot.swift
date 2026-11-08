@@ -7,6 +7,12 @@ struct ScreenshotGeometry {
     static func rect(_ a: CGPoint, _ b: CGPoint, bounds: CGRect) -> CGRect {
         CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y)).intersection(bounds)
     }
+    // Pointer events can stop a point short of the last row or column of the display.
+    static func snapToEdge(_ value: CGFloat, pointer: CGFloat? = nil, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
+        if (pointer ?? value) <= lower + 1 || value <= lower + 1 { return lower }
+        if (pointer ?? value) >= upper - 1 || value >= upper - 1 { return upper }
+        return value
+    }
     /// ScreenCaptureKit images and the editor both use top-left pixel coordinates.
     static func pixelRect(_ selection: CGRect, points: CGSize, pixels: CGSize) -> CGRect {
         guard points.width > 0, points.height > 0 else { return .zero }
@@ -14,6 +20,45 @@ struct ScreenshotGeometry {
         guard !r.isNull else { return .zero }
         return CGRect(x: r.minX * pixels.width / points.width, y: r.minY * pixels.height / points.height,
                       width: r.width * pixels.width / points.width, height: r.height * pixels.height / points.height).integral.intersection(CGRect(origin: .zero, size: pixels))
+    }
+}
+
+private enum ScreenshotHandle: Int, CaseIterable {
+    case topLeft, top, topRight, left, right = 5, bottomLeft, bottom, bottomRight
+
+    private var column: Int { rawValue % 3 }
+    private var row: Int { rawValue / 3 }
+
+    func point(in rect: CGRect) -> CGPoint {
+        CGPoint(x: rect.minX + rect.width * CGFloat(column) / 2,
+                y: rect.minY + rect.height * CGFloat(row) / 2)
+    }
+
+    func resize(_ rect: CGRect, from start: CGPoint, to end: CGPoint, bounds: CGRect) -> CGRect {
+        let edge = point(in: rect)
+        let x = ScreenshotGeometry.snapToEdge(edge.x + end.x - start.x, pointer: end.x, min: bounds.minX, max: bounds.maxX)
+        let y = ScreenshotGeometry.snapToEdge(edge.y + end.y - start.y, pointer: end.y, min: bounds.minY, max: bounds.maxY)
+        let a = CGPoint(x: column == 0 ? x : rect.minX, y: row == 0 ? y : rect.minY)
+        let b = CGPoint(x: column == 2 ? x : rect.maxX, y: row == 2 ? y : rect.maxY)
+        return ScreenshotGeometry.rect(a, b, bounds: bounds)
+    }
+
+    var cursor: NSCursor {
+        if #available(macOS 15.0, *) {
+            let position: NSCursor.FrameResizePosition
+            switch self {
+            case .topLeft: position = .topLeft
+            case .top: position = .top
+            case .topRight: position = .topRight
+            case .left: position = .left
+            case .right: position = .right
+            case .bottomLeft: position = .bottomLeft
+            case .bottom: position = .bottom
+            case .bottomRight: position = .bottomRight
+            }
+            return .frameResize(position: position, directions: [.inward, .outward])
+        }
+        return column == 1 ? .resizeUpDown : .resizeLeftRight
     }
 }
 
@@ -209,44 +254,43 @@ struct RecognizedScreenshotText: View {
 
 final class ScreenshotCanvas: NSView {
     let editor: ScreenshotEditor
+    private let pasteboard: NSPasteboard
     private var anchor = CGPoint.zero
     private var original = CGRect.zero
-    private var dragMode = 0 // 0 new selection, 1 move, 2 resize, 3 annotation
-    private var opposite = CGPoint.zero
+    private enum DragMode { case select, move, resize(ScreenshotHandle), annotate }
+    private var dragMode: DragMode?
     private var pending: ScreenshotAnnotation?
     private var tools: NSHostingView<ScreenshotToolbar>!
     private var actions: NSHostingView<ScreenshotActions>!
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    init(editor: ScreenshotEditor) {
+    init(editor: ScreenshotEditor, pasteboard: NSPasteboard = .general) {
         self.editor = editor
+        self.pasteboard = pasteboard
         super.init(frame: CGRect(origin: .zero, size: editor.size))
         tools = NSHostingView(rootView: ScreenshotToolbar(editor: editor))
         actions = NSHostingView(rootView: ScreenshotActions(editor: editor, save: { [weak self] in self?.editor.save(in: self?.window) }))
+        // The native borderless Menu resolves its symbol color from AppKit's appearance.
+        actions.appearance = NSAppearance(named: .darkAqua)
         addSubview(tools); addSubview(actions); tools.isHidden = true; actions.isHidden = true
         editor.changed = { [weak self] in self?.needsDisplay = true }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    private var selectionCorners: [CGPoint] {
-        let r = editor.selection
-        return [CGPoint(x:r.minX,y:r.minY), CGPoint(x:r.maxX,y:r.minY),
-                CGPoint(x:r.minX,y:r.maxY), CGPoint(x:r.maxX,y:r.maxY)]
-    }
-    private func cornerRect(_ point: CGPoint) -> CGRect {
+    private func handleRect(_ point: CGPoint) -> CGRect {
         CGRect(x:point.x-12,y:point.y-12,width:24,height:24).intersection(bounds)
+    }
+    private func handle(at point: CGPoint) -> ScreenshotHandle? {
+        ScreenshotHandle.allCases.filter { handleRect($0.point(in: editor.selection)).contains(point) }
+            .min {
+                let a = $0.point(in: editor.selection), b = $1.point(in: editor.selection)
+                return hypot(a.x - point.x, a.y - point.y) < hypot(b.x - point.x, b.y - point.y)
+            }
     }
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .crosshair)
         guard editor.valid else { return }
-        for (index, point) in selectionCorners.enumerated() {
-            let cursor: NSCursor
-            if #available(macOS 15.0, *) {
-                let positions: [NSCursor.FrameResizePosition] = [.topLeft, .topRight, .bottomLeft, .bottomRight]
-                cursor = .frameResize(position: positions[index], directions: [.inward, .outward])
-            } else {
-                cursor = .resizeLeftRight
-            }
-            addCursorRect(cornerRect(point), cursor: cursor)
+        for handle in ScreenshotHandle.allCases {
+            addCursorRect(handleRect(handle.point(in: editor.selection)), cursor: handle.cursor)
         }
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -261,15 +305,25 @@ final class ScreenshotCanvas: NSView {
             NSGraphicsContext.saveGraphicsState(); NSBezierPath(rect: r).addClip()
             editor.annotations.forEach { $0.draw() }; pending?.draw()
             NSGraphicsContext.restoreGraphicsState()
-            NSColor.white.setStroke(); NSBezierPath(rect: r).withWidth(1).stroke()
+            let outline = NSBezierPath(rect: r.insetBy(dx: 0.5, dy: 0.5))
+            NSColor.black.withAlphaComponent(0.85).setStroke(); outline.withWidth(3).stroke()
+            NSColor.white.setStroke(); outline.withWidth(1).stroke()
+            for handle in ScreenshotHandle.allCases {
+                let point = handle.point(in: r)
+                let x = min(max(4, point.x), bounds.width - 4)
+                let y = min(max(4, point.y), bounds.height - 4)
+                let marker = NSBezierPath(rect: CGRect(x: x - 3, y: y - 3, width: 6, height: 6))
+                NSColor.white.setFill(); marker.fill()
+                NSColor.black.setStroke(); marker.stroke()
+            }
             let pixelRect=ScreenshotGeometry.pixelRect(r,points:editor.size,pixels:CGSize(width:editor.image.width,height:editor.image.height))
             let label="\(Int(pixelRect.width)) × \(Int(pixelRect.height))"
             let attributes: [NSAttributedString.Key:Any]=[.foregroundColor:NSColor.white,.font:NSFont.monospacedDigitSystemFont(ofSize:10,weight:.medium)]
             let labelSize=(label as NSString).size(withAttributes:attributes)
-            let labelRect=CGRect(x:r.minX,y:max(3,r.minY-21),width:labelSize.width+10,height:17)
+            let labelRect=CGRect(x:max(0,min(r.minX,bounds.width-labelSize.width-10)),
+                                 y:r.minY >= 24 ? r.minY-21 : r.minY+9,width:labelSize.width+10,height:17)
             NSColor.black.withAlphaComponent(0.65).setFill();NSBezierPath(roundedRect:labelRect,xRadius:4,yRadius:4).fill()
             (label as NSString).draw(at:CGPoint(x:labelRect.minX+5,y:labelRect.minY+2),withAttributes:attributes)
-            for p in [CGPoint(x:r.minX,y:r.minY),CGPoint(x:r.maxX,y:r.minY),CGPoint(x:r.minX,y:r.maxY),CGPoint(x:r.maxX,y:r.maxY)] { NSColor.white.setFill(); CGRect(x:p.x-3,y:p.y-3,width:6,height:6).fill() }
         } else {
             bounds.fill()
             ("Выдели область · двойной клик — весь экран · Esc — отмена" as NSString).draw(at: CGPoint(x: 30, y: 60), withAttributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 17, weight: .medium)])
@@ -282,28 +336,36 @@ final class ScreenshotCanvas: NSView {
         let r=editor.selection
         let w: CGFloat=28, h: CGFloat=168
         let aw: CGFloat=198, ah: CGFloat=28
-        let actionsBelow=r.maxY+ah+12 <= bounds.height
+        let gap: CGFloat = 13 // Leave the resize handles' hit areas free.
+        let actionsBelow=r.maxY+ah+gap+6 <= bounds.height
         let ax=min(max(6,r.maxX-aw),max(6,bounds.width-aw-6))
-        let ay=actionsBelow ? r.maxY+6 : max(6,r.maxY-ah-6)
-        let right=r.maxX+6
-        let x=right+w <= bounds.width-6 ? right : max(6,r.maxX-w-6)
+        let ay=actionsBelow ? r.maxY+gap : max(6,r.maxY-ah-gap)
+        let right=r.maxX+gap
+        let x=right+w <= bounds.width-6 ? right : max(6,r.maxX-w-gap)
         let bottom=actionsBelow ? r.maxY : ay-6
         let y=min(max(6,bottom-h),max(6,bounds.height-h-6))
-        tools.frame=CGRect(x:x,y:y,width:w,height:min(h,bounds.height-12))
-        actions.frame=CGRect(x:ax,y:ay,width:aw,height:ah)
+        let actionFrame = CGRect(x: ax, y: ay, width: aw, height: ah)
+        var toolFrame = CGRect(x: x, y: y, width: w, height: min(h, bounds.height-12))
+        if toolFrame.intersects(actionFrame) {
+            let below = actionFrame.maxY + 6
+            toolFrame.origin.y = below + toolFrame.height <= bounds.height - 6 ? below : max(6, actionFrame.minY - toolFrame.height - 6)
+        }
+        tools.frame = toolFrame
+        actions.frame = actionFrame
         needsDisplay = true
     }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         anchor = convert(event.locationInWindow, from: nil); original = editor.selection
-        if event.clickCount == 2, editor.tool == .select { editor.selection = bounds; updateTools(); return }
-        if editor.valid, let i = selectionCorners.firstIndex(where: { cornerRect($0).contains(anchor) }) {
-            dragMode=2; opposite=selectionCorners[3-i]
+        dragMode = nil
+        if event.clickCount == 2, editor.tool == .select {
+            editor.selection = bounds; updateTools(); editor.writeClipboard(to: pasteboard); return
+        }
+        if editor.valid, let handle = handle(at: anchor) {
+            dragMode = .resize(handle)
         } else if editor.tool == .select {
-            if editor.valid, original.contains(anchor) { dragMode=1 }
-            else { dragMode=0; editor.selection = .zero }
+            dragMode = editor.valid && original.contains(anchor) ? .move : .select
         } else if editor.valid, original.contains(anchor) {
-            dragMode=3
             if editor.tool == .text {
                 let alert = NSAlert(); alert.messageText = "Текст на скриншоте"
                 let field = NSTextField(frame: NSRect(x:0,y:0,width:320,height:28)); alert.accessoryView=field
@@ -311,29 +373,45 @@ final class ScreenshotCanvas: NSView {
                 alert.window.level = .screenSaver; alert.window.initialFirstResponder=field
                 if alert.runModal() == .alertFirstButtonReturn, !field.stringValue.isEmpty {
                     editor.annotations.append(ScreenshotAnnotation(tool:.text,points:[anchor],color:NSColor(editor.color),width:editor.width,text:field.stringValue))
-                }; needsDisplay=true; editor.writeClipboard(); return
+                }; needsDisplay=true; editor.writeClipboard(to: pasteboard); return
             }
+            dragMode = .annotate
             pending=ScreenshotAnnotation(tool:editor.tool,points:[anchor,anchor],color:NSColor(editor.color),width:editor.width)
-        } else { dragMode = -1 }
+        }
+    }
+    private func updateDrag(to p: CGPoint) {
+        switch dragMode {
+        case .select:
+            func snapped(_ point: CGPoint) -> CGPoint {
+                CGPoint(x: ScreenshotGeometry.snapToEdge(point.x, min: bounds.minX, max: bounds.maxX),
+                        y: ScreenshotGeometry.snapToEdge(point.y, min: bounds.minY, max: bounds.maxY))
+            }
+            let selection = ScreenshotGeometry.rect(snapped(anchor), snapped(p), bounds: bounds)
+            if selection.width >= 3 && selection.height >= 3 { editor.selection = selection }
+        case .move:
+            let x = ScreenshotGeometry.snapToEdge(original.minX+p.x-anchor.x, min: 0, max: bounds.width-original.width)
+            let y = ScreenshotGeometry.snapToEdge(original.minY+p.y-anchor.y, min: 0, max: bounds.height-original.height)
+            editor.selection = CGRect(x:x,y:y,width:original.width,height:original.height)
+        case .resize(let handle):
+            let selection = handle.resize(original, from: anchor, to: p, bounds: bounds)
+            if selection.width >= 3 && selection.height >= 3 { editor.selection = selection }
+        case .annotate:
+            if pending?.tool == .pen { pending?.points.append(p) } else if pending != nil { pending?.points[1]=p }
+        case nil: return
+        }
+        updateTools()
     }
     override func mouseDragged(with event: NSEvent) {
-        let p = convert(event.locationInWindow,from:nil)
-        switch dragMode {
-        case 0: editor.selection = ScreenshotGeometry.rect(anchor,p,bounds:bounds)
-        case 1:
-            let x = min(max(0, original.minX+p.x-anchor.x),bounds.width-original.width)
-            let y = min(max(0, original.minY+p.y-anchor.y),bounds.height-original.height)
-            editor.selection = CGRect(x:x,y:y,width:original.width,height:original.height)
-        case 2: editor.selection=ScreenshotGeometry.rect(opposite,p,bounds:bounds)
-        case 3:
-            if pending?.tool == .pen { pending?.points.append(p) } else if pending != nil { pending?.points[1]=p }
-        default: break
-        }
-        tools.isHidden=true; actions.isHidden=true; needsDisplay=true
+        updateDrag(to: convert(event.locationInWindow, from: nil))
     }
     override func mouseUp(with event: NSEvent) {
+        guard dragMode != nil else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if point != anchor { updateDrag(to: point) }
+        dragMode = nil
         if let pending { editor.annotations.append(pending) }; pending=nil
-        updateTools(); editor.writeClipboard()
+        updateTools()
+        if editor.selection != original || editor.tool != .select { editor.writeClipboard(to: pasteboard) }
     }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { editor.close?(); return }
@@ -342,7 +420,7 @@ final class ScreenshotCanvas: NSView {
             case .copy: editor.copyScreenshot()
             case .save: editor.save(in:window)
             case .undo: editor.undo()
-            case .selectAll: editor.selection=bounds;updateTools();editor.writeClipboard()
+            case .selectAll: editor.selection=bounds;updateTools();editor.writeClipboard(to: pasteboard)
             case .recognize: editor.recognizeText()
             }
         } else if event.keyCode == 36 { editor.copyScreenshot() }
@@ -351,16 +429,17 @@ final class ScreenshotCanvas: NSView {
 }
 struct ScreenshotGlassSurface: ViewModifier {
     func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12)
         Group {
             if #available(macOS 26.0, *) {
-                content.glassEffect(.clear.tint(.white.opacity(0.07)), in:RoundedRectangle(cornerRadius:12))
-                    .overlay { RoundedRectangle(cornerRadius:12).stroke(LinearGradient(colors:[.white.opacity(0.55),.white.opacity(0.08),.white.opacity(0.22)],startPoint:.topLeading,endPoint:.bottomTrailing),lineWidth:0.65) }
-                    .shadow(color:.black.opacity(0.18),radius:8,y:3)
+                content.background(.black.opacity(0.76), in: shape).glassEffect(.clear, in: shape)
             } else {
-                content.background(.ultraThinMaterial,in:RoundedRectangle(cornerRadius:12))
-                    .overlay { RoundedRectangle(cornerRadius:12).stroke(.white.opacity(0.18),lineWidth:0.5) }
+                content.background(.black.opacity(0.82), in: shape)
             }
         }
+        .foregroundStyle(.white)
+        .overlay { shape.strokeBorder(.white.opacity(0.30), lineWidth: 0.75).allowsHitTesting(false) }
+        .shadow(color: .black.opacity(0.30), radius: 5, y: 2)
     }
 }
 struct ScreenshotIconButtonStyle: ButtonStyle {
